@@ -1,0 +1,50 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+*.p12
+
+# Python and tooling
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Runtime data
+storage/**
+!storage/.gitkeep
+*.log
+*.dump
+*.sql
+
+# WorkMind data, diagnostics, and local recovery artifacts
+.workmind-backups/
+ProjectDocs/
+*_report.json
+*_context.json
+*_bundle.json
+ke_packet.json
+ke_attachment_packet.json
+storage_code_map.txt
+storage_impl_context.txt
+history_debug_*.log
+*.bak
+*.before-*
+

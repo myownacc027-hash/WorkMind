@@ -1,0 +1,81 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "workmind"
+version = "0.12.1"
+description = "Local AI knowledge system for Outlook mail and work documents"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+  "alembic>=1.14,<2",
+  "pydantic>=2.10,<3",
+  "pydantic-settings>=2.7,<3",
+  "psycopg[binary]>=3.2,<4",
+  "python-dotenv>=1.0,<2",
+  "pypdf>=5,<7",
+  "python-docx>=1.1,<2",
+  "python-pptx>=1.0,<2",
+  "openpyxl>=3.1,<4",
+  "qdrant-client>=1.18,<1.19",
+  "mcp>=1.28,<2",
+  "starlette>=0.27,<2",
+  "uvicorn>=0.31,<1",
+  "sqlalchemy>=2.0,<3",
+  "structlog>=24.4,<26",
+  "typer>=0.15,<1",
+]
+
+[project.optional-dependencies]
+windows = ["pywin32>=308", "psutil>=6,<8"]
+embeddings = ["fastembed>=0.7,<1"]
+dev = [
+  "mypy>=1.14,<2",
+  "pytest>=8.3,<9",
+  "ruff>=0.9,<1",
+]
+
+[project.scripts]
+workmind-outlook = "apps.outlook_collector.main:app"
+workmind-worker = "apps.processing_worker.main:app"
+workmind-search = "apps.search_cli.main:app"
+workmind-mcp = "apps.mcp_server.server:main"
+workmind-mcp-check = "apps.mcp_server.check:main"
+workmind-embedding-server = "apps.embedding_server.server:main"
+workmind-embedding-start = "apps.embedding_server.cli:start_main"
+workmind-embedding-stop = "apps.embedding_server.cli:stop_main"
+workmind-embedding-status = "apps.embedding_server.cli:status_main"
+workmind-sync-now = "apps.sync_runner.main:app"
+workmind-sync-status = "apps.sync_runner.status:main"
+workmind-history-import = "apps.history_importer.main:app"
+workmind-history-status = "apps.history_importer.status:main"
+workmind-outlook-stores = "apps.history_importer.stores:main"
+workmind-history-purge-folder = "apps.history_importer.purge:app"
+workmind-attachments-backfill = "apps.attachment_processor.backfill:app"
+workmind-attachments-worker = "apps.attachment_processor.main:app"
+workmind-attachments-status = "apps.attachment_processor.status:main"
+workmind-index-admin = "apps.index_admin.main:app"
+workmind-audit-status = "apps.mcp_server.audit_status:main"
+workmind-documents-import = "apps.document_ingestion.main:app"
+workmind-documents-status = "apps.document_ingestion.status:main"
+workmind-documents-reprocess = "apps.document_ingestion.reprocess:app"
+workmind-knowledge-import = "apps.knowledge_cli.main:app"
+workmind-knowledge-status = "apps.knowledge_cli.status:main"
+workmind-knowledge-extraction = "apps.knowledge_extraction_cli.main:app"
+workmind-knowledge-extraction-status = "apps.knowledge_extraction_cli.status:main"
+workmind-knowledge-extract-now = "apps.knowledge_extraction_cli.worker:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["apps", "packages"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

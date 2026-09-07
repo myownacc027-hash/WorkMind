@@ -1,0 +1,34 @@
+{
+  "entities": [
+    {
+      "key": "task_189422",
+      "entity_type": "task",
+      "canonical_name": "Б24 №189422",
+      "external_id": "189422",
+      "attributes": {
+        "system": "Bitrix24"
+      }
+    }
+  ],
+  "claims": [
+    {
+      "subject_key": "task_189422",
+      "predicate": "goal",
+      "object_text": "Заменить подтверждённой целью задачи.",
+      "claim_text": "Заменить проверяемым утверждением.",
+      "evidence_type": "direct_statement",
+      "confidence": 0.95,
+      "observed_at": "2026-07-02",
+      "evidence": [
+        {
+          "source_ref": "workmind://email/REPLACE-WITH-UUID",
+          "chunk_id": "REPLACE-WITH-UUID",
+          "evidence_role": "direct_statement",
+          "excerpt": "Необязательный точный фрагмент."
+        }
+      ]
+    }
+  ],
+  "relations": [],
+  "events": []
+}

@@ -1,0 +1,1 @@
+"""Structured WorkMind knowledge layer."""
