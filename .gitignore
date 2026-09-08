@@ -48,3 +48,7 @@ history_debug_*.log
 *.bak
 *.before-*
 
+
+# Local one-off storage migration scripts
+/storage_*.py
+/apply_storage_*.py
