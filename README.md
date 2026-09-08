@@ -137,3 +137,23 @@ workmind-knowledge-extraction-status состояние extraction pipeline
 
 WorkMind находится в активной разработке. Baseline `pre-STORAGE-02` предназначен как воспроизводимая контрольная точка перед массовым переносом legacy-вложений в CAS. Это не готовый универсальный установщик и не заменяет резервное копирование рабочих данных.
 
+## Резервное копирование и восстановление
+
+Полное руководство — [`docs/backup-and-restore.md`](docs/backup-and-restore.md).
+
+Краткое начало работы:
+
+```powershell
+# Создать backup
+.\scripts\backup\backup_workmind.ps1 -BackupRoot "D:\WorkMindBackups"
+
+# Проверить backup
+.\scripts\backup\verify_backup.ps1 -BackupPath "D:\WorkMindBackups\WorkMindBackup-..."
+
+# Тест восстановления (изолированный, без затрагивания production)
+.\scripts\backup\restore_workmind.ps1 -BackupPath "D:\WorkMindBackups\WorkMindBackup-..."
+```
+
+**Source of truth: PostgreSQL + CAS.** Qdrant — производный индекс, перестраивается из source of truth.
+
+> **Важно:** backup на том же диске `C:` — это локальная recovery-копия, не защита от физического отказа диска.
