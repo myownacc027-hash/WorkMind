@@ -389,6 +389,35 @@ def backup_qdrant(
             snap_size / 1_048_576, snap_sha256[:16],
         )
 
+        # IMPORTANT: Delete the snapshot from inside the Qdrant container immediately
+        # after download. Without this, every backup permanently occupies ~5-6 GB
+        # inside the Docker volume (workmind_qdrant_data / WSL2 VHDX), which never
+        # shrinks automatically even after the file is deleted.
+        try:
+            import urllib.parse
+            snap_encoded = urllib.parse.quote(snap_name, safe="")
+            del_req = urllib.request.Request(
+                f"{qdrant_url}/collections/{collection}/snapshots/{snap_encoded}",
+                method="DELETE",
+            )
+            with urllib.request.urlopen(del_req, timeout=30) as del_resp:
+                del_data = json.loads(del_resp.read())
+            if del_data.get("status") == "ok":
+                logger.info(
+                    "Qdrant snapshot deleted from container (freed ~%.0f MB from Docker volume).",
+                    snap_size / 1_048_576,
+                )
+            else:
+                logger.warning(
+                    "Qdrant snapshot DELETE returned unexpected response: %s", del_data
+                )
+        except Exception as del_err:
+            logger.warning(
+                "Could not delete Qdrant snapshot from container: %s — "
+                "delete manually via: DELETE %s/collections/%s/snapshots/%s",
+                del_err, qdrant_url, collection, snap_name,
+            )
+
     except Exception as e:
         logger.warning(
             "Qdrant snapshot unavailable: %s — "
