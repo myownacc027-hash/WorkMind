@@ -282,6 +282,7 @@ def payload_indexes(
 
     required = {
         "source_type": models.PayloadSchemaType.KEYWORD,
+        "source_id": models.PayloadSchemaType.KEYWORD,
     }
     before_info = client.get_collection(
         settings.qdrant_collection

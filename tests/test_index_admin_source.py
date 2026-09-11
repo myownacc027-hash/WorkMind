@@ -17,5 +17,6 @@ def test_qdrant_payload_index_command_is_present() -> None:
     ).read_text(encoding="utf-8")
     assert '@app.command("payload-indexes")' in source
     assert '"source_type": models.PayloadSchemaType.KEYWORD' in source
+    assert '"source_id": models.PayloadSchemaType.KEYWORD' in source
     assert "create_payload_index(" in source
     assert "timeout=600" in source

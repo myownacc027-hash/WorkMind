@@ -8,7 +8,7 @@ from datetime import UTC, date, datetime, time as datetime_time, timedelta
 from typing import Any
 
 from qdrant_client import models as qmodels
-from sqlalchemy import select, text
+from sqlalchemy import bindparam, func, select, text
 
 from packages.common.config import Settings, get_settings
 from packages.database.models import (
@@ -160,17 +160,368 @@ def _merge_chunk(
         )
 
 
+def _eligible_source_types(
+    source_type: str,
+    *,
+    sender: str | None,
+    filename: str | None,
+) -> tuple[str, ...]:
+    requested = (
+        {
+            "email",
+            "attachment",
+            "document",
+        }
+        if source_type == "all"
+        else {
+            source_type,
+        }
+    )
+
+    # Documents have no sender metadata.
+    if sender:
+        requested.discard(
+            "document"
+        )
+
+    # Email itself has no filename.
+    if filename:
+        requested.discard(
+            "email"
+        )
+
+    return tuple(
+        name
+        for name in (
+            "email",
+            "attachment",
+            "document",
+        )
+        if name in requested
+    )
+
+
+def _metadata_eligible_source_ids(
+    *,
+    source_type: str,
+    sender: str | None,
+    filename: str | None,
+    date_from: datetime | None,
+    date_to: datetime | None,
+) -> dict[
+    str,
+    tuple[uuid.UUID, ...],
+] | None:
+    """
+    Resolve metadata filters to source IDs BEFORE retrieval.
+
+    None means that no metadata filter is active.
+    An empty mapping means that the active filters cannot
+    match any source type.
+    """
+
+    if not (
+        sender
+        or filename
+        or date_from
+        or date_to
+    ):
+        return None
+
+    eligible_types = (
+        _eligible_source_types(
+            source_type,
+            sender=sender,
+            filename=filename,
+        )
+    )
+
+    result: dict[
+        str,
+        tuple[uuid.UUID, ...],
+    ] = {}
+
+    if not eligible_types:
+        return result
+
+    sender_value = (
+        sender.casefold().strip()
+        if sender
+        else None
+    )
+
+    filename_value = (
+        filename.casefold().strip()
+        if filename
+        else None
+    )
+
+    with SessionLocal() as session:
+
+        # -------------------------------------------------------------
+        # Email
+        # -------------------------------------------------------------
+
+        if "email" in eligible_types:
+            statement = select(
+                EmailMessage.id
+            )
+
+            if sender_value is not None:
+                sender_text = func.lower(
+                    func.concat_ws(
+                        " ",
+                        func.coalesce(
+                            EmailMessage.sender_name,
+                            "",
+                        ),
+                        func.coalesce(
+                            EmailMessage.sender_email,
+                            "",
+                        ),
+                    )
+                )
+
+                statement = (
+                    statement.where(
+                        func.strpos(
+                            sender_text,
+                            sender_value,
+                        )
+                        > 0
+                    )
+                )
+
+            occurred = func.coalesce(
+                EmailMessage.received_at,
+                EmailMessage.sent_at,
+            )
+
+            if date_from is not None:
+                statement = (
+                    statement.where(
+                        occurred
+                        >= date_from
+                    )
+                )
+
+            if date_to is not None:
+                statement = (
+                    statement.where(
+                        occurred
+                        < date_to
+                    )
+                )
+
+            result["email"] = tuple(
+                session.scalars(
+                    statement
+                ).all()
+            )
+
+        # -------------------------------------------------------------
+        # Attachment
+        # -------------------------------------------------------------
+
+        if (
+            "attachment"
+            in eligible_types
+        ):
+            statement = (
+                select(
+                    Attachment.id
+                )
+                .join(
+                    EmailMessage,
+                    EmailMessage.id
+                    == Attachment.message_id,
+                )
+            )
+
+            if sender_value is not None:
+                sender_text = func.lower(
+                    func.concat_ws(
+                        " ",
+                        func.coalesce(
+                            EmailMessage.sender_name,
+                            "",
+                        ),
+                        func.coalesce(
+                            EmailMessage.sender_email,
+                            "",
+                        ),
+                    )
+                )
+
+                statement = (
+                    statement.where(
+                        func.strpos(
+                            sender_text,
+                            sender_value,
+                        )
+                        > 0
+                    )
+                )
+
+            if (
+                filename_value
+                is not None
+            ):
+                statement = (
+                    statement.where(
+                        func.strpos(
+                            func.lower(
+                                Attachment.filename
+                            ),
+                            filename_value,
+                        )
+                        > 0
+                    )
+                )
+
+            occurred = func.coalesce(
+                EmailMessage.received_at,
+                EmailMessage.sent_at,
+            )
+
+            if date_from is not None:
+                statement = (
+                    statement.where(
+                        occurred
+                        >= date_from
+                    )
+                )
+
+            if date_to is not None:
+                statement = (
+                    statement.where(
+                        occurred
+                        < date_to
+                    )
+                )
+
+            result[
+                "attachment"
+            ] = tuple(
+                session.scalars(
+                    statement
+                ).all()
+            )
+
+        # -------------------------------------------------------------
+        # External document
+        # -------------------------------------------------------------
+
+        if (
+            "document"
+            in eligible_types
+        ):
+            statement = select(
+                ExternalDocument.id
+            )
+
+            if (
+                filename_value
+                is not None
+            ):
+                statement = (
+                    statement.where(
+                        func.strpos(
+                            func.lower(
+                                ExternalDocument
+                                .original_filename
+                            ),
+                            filename_value,
+                        )
+                        > 0
+                    )
+                )
+
+            if date_from is not None:
+                statement = (
+                    statement.where(
+                        ExternalDocument
+                        .source_date
+                        >= date_from
+                    )
+                )
+
+            if date_to is not None:
+                statement = (
+                    statement.where(
+                        ExternalDocument
+                        .source_date
+                        < date_to
+                    )
+                )
+
+            result[
+                "document"
+            ] = tuple(
+                session.scalars(
+                    statement
+                ).all()
+            )
+
+    return result
+
+
+def _flatten_eligible_source_ids(
+    value: dict[
+        str,
+        tuple[uuid.UUID, ...],
+    ]
+    | None,
+) -> tuple[uuid.UUID, ...] | None:
+    if value is None:
+        return None
+
+    unique_ids = {
+        source_id
+        for source_ids
+        in value.values()
+        for source_id
+        in source_ids
+    }
+
+    return tuple(
+        sorted(
+            unique_ids,
+            key=str,
+        )
+    )
+
+
 def _semantic_candidates(
     *,
     query: str,
     source_type: str,
     candidate_limit: int,
     min_score: float,
-) -> tuple[list[dict[str, Any]], list[str]]:
+    eligible_source_ids: (
+        tuple[uuid.UUID, ...]
+        | None
+    ) = None,
+) -> tuple[
+    list[dict[str, Any]],
+    list[str],
+]:
     warnings: list[str] = []
+
+    # An active metadata filter resolved to zero sources.
+    # Do not calculate an embedding and do not ask Qdrant.
+    if (
+        eligible_source_ids
+        is not None
+        and not eligible_source_ids
+    ):
+        return [], warnings
+
     settings = get_settings()
+
     try:
         client = get_qdrant_client()
+
         if not client.collection_exists(
             settings.qdrant_collection
         ):
@@ -179,47 +530,119 @@ def _semantic_candidates(
                 "semantic channel was skipped."
             ]
 
-        query_filter = None
+        must_conditions: list[Any] = []
+
         if source_type != "all":
-            query_filter = qmodels.Filter(
-                must=[
-                    qmodels.FieldCondition(
-                        key="source_type",
-                        match=qmodels.MatchValue(
-                            value=source_type
-                        ),
-                    )
-                ]
+            must_conditions.append(
+                qmodels.FieldCondition(
+                    key="source_type",
+                    match=qmodels.MatchValue(
+                        value=source_type,
+                    ),
+                )
             )
 
-        vector = embed_texts([query])[0]
+        if (
+            eligible_source_ids
+            is not None
+        ):
+            collection_info = (
+                client.get_collection(
+                    settings.qdrant_collection
+                )
+            )
+
+            payload_schema = (
+                getattr(
+                    collection_info,
+                    "payload_schema",
+                    None,
+                )
+                or {}
+            )
+
+            if (
+                "source_id"
+                not in payload_schema
+            ):
+                return [], [
+                    "Qdrant source_id payload "
+                    "index is missing; semantic "
+                    "metadata pushdown was "
+                    "skipped."
+                ]
+
+            must_conditions.append(
+                qmodels.FieldCondition(
+                    key="source_id",
+                    match=qmodels.MatchAny(
+                        any=[
+                            str(source_id)
+                            for source_id
+                            in eligible_source_ids
+                        ],
+                    ),
+                )
+            )
+
+        query_filter = (
+            qmodels.Filter(
+                must=must_conditions
+            )
+            if must_conditions
+            else None
+        )
+
+        vector = embed_texts(
+            [
+                query,
+            ]
+        )[0]
+
         response = client.query_points(
-            collection_name=settings.qdrant_collection,
+            collection_name=(
+                settings.qdrant_collection
+            ),
             query=vector,
             query_filter=query_filter,
             limit=candidate_limit,
             score_threshold=(
-                min_score if min_score > 0 else None
+                min_score
+                if min_score > 0
+                else None
             ),
             with_payload=True,
         )
+
         return [
             {
                 "rank": rank,
-                "score": float(point.score),
-                "point_id": str(point.id),
-                "payload": point.payload or {},
+                "score": float(
+                    point.score
+                ),
+                "point_id": str(
+                    point.id
+                ),
+                "payload": (
+                    point.payload
+                    or {}
+                ),
             }
-            for rank, point in enumerate(
+            for rank, point
+            in enumerate(
                 response.points,
                 start=1,
             )
         ], warnings
+
     except Exception as exc:
         warnings.append(
-            "Semantic search channel failed and was skipped: "
-            f"{type(exc).__name__}: {exc}"
+            "Semantic search channel "
+            "failed and was skipped: "
+            f"{type(exc).__name__}: "
+            f"{exc}"
         )
+
         return [], warnings
 
 
@@ -241,38 +664,89 @@ def _lexical_candidates(
     query: str,
     source_type: str,
     candidate_limit: int,
-) -> tuple[list[dict[str, Any]], list[str]]:
+    eligible_source_ids: (
+        tuple[uuid.UUID, ...]
+        | None
+    ) = None,
+) -> tuple[
+    list[dict[str, Any]],
+    list[str],
+]:
     if not _fts_index_available():
         return [], [
-            "PostgreSQL hybrid-search index is missing; "
-            "run `alembic upgrade head`."
+            "PostgreSQL hybrid-search "
+            "index is missing; run "
+            "`alembic upgrade head`."
         ]
 
-    identifier = is_identifier_query(query)
+    # Active metadata filters resolved to no sources.
+    if (
+        eligible_source_ids
+        is not None
+        and not eligible_source_ids
+    ):
+        return [], []
+
+    source_id_filter_sql = (
+        """
+        AND chunks.source_id
+            IN :eligible_source_ids
+        """
+        if eligible_source_ids
+        is not None
+        else ""
+    )
+
+    def prepare_statement(
+        statement,
+    ):
+        if (
+            eligible_source_ids
+            is not None
+        ):
+            statement = (
+                statement.bindparams(
+                    bindparam(
+                        "eligible_source_ids",
+                        expanding=True,
+                    )
+                )
+            )
+
+        return statement
+
+    def add_source_params(
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        if (
+            eligible_source_ids
+            is not None
+        ):
+            params[
+                "eligible_source_ids"
+            ] = (
+                eligible_source_ids
+            )
+
+        return params
+
+    identifier = is_identifier_query(
+        query
+    )
+
     compound_identifier = (
-        parse_compound_identifier(query)
+        parse_compound_identifier(
+            query
+        )
         if identifier
         else None
     )
 
-    if compound_identifier is not None:
-        # PostgreSQL's FTS parser treats ASCII-hyphenated
-        # identifiers differently from most other separators.
-        #
-        # Example:
-        #     СТ-199
-        #
-        # may expose the prefix lexeme "ст" but not a separate
-        # numeric lexeme "199". Therefore `ст & 199` is not a
-        # reliable FTS condition for compound identifiers.
-        #
-        # Use the indexed prefix as the fast GIN prefilter and
-        # validate the complete identifier structure with a
-        # parameterized PostgreSQL regex.
-        #
-        # The Python structural matcher in ranking.py remains
-        # the final independent quality check.
+    # ================================================================
+    # Compound identifiers
+    # ================================================================
 
+    if compound_identifier is not None:
         identifier_pattern = (
             r"(^|[^0-9A-Za-zА-Яа-яЁё_])"
             + re.escape(
@@ -290,11 +764,14 @@ def _lexical_candidates(
             + re.escape(
                 compound_identifier.number
             )
-            + r"($|[^0-9A-Za-zА-Яа-яЁё_])"
+            + (
+                r"($|"
+                r"[^0-9A-Za-zА-Яа-яЁё_])"
+            )
         )
 
         statement = text(
-            """
+            f"""
             WITH search_query AS (
                 SELECT
                     plainto_tsquery(
@@ -302,12 +779,14 @@ def _lexical_candidates(
                         :identifier_prefix
                     ) AS prefix_query
             )
+
             SELECT
                 chunks.id,
                 chunks.source_type,
                 chunks.source_id,
                 chunks.chunk_index,
                 chunks.text,
+
                 ts_rank_cd(
                     to_tsvector(
                         'simple'::regconfig,
@@ -319,8 +798,12 @@ def _lexical_candidates(
                     search_query.prefix_query,
                     32
                 ) AS lexical_score
-            FROM document_chunks AS chunks
+
+            FROM document_chunks
+                AS chunks
+
             CROSS JOIN search_query
+
             WHERE
                 to_tsvector(
                     'simple'::regconfig,
@@ -334,13 +817,16 @@ def _lexical_candidates(
                 AND COALESCE(
                     chunks.text,
                     ''::text
-                ) ~* :identifier_pattern
+                )
+                ~* :identifier_pattern
 
                 AND (
                     :source_type = 'all'
                     OR chunks.source_type
                     = :source_type
                 )
+
+                {source_id_filter_sql}
 
             ORDER BY
                 lexical_score DESC,
@@ -350,40 +836,65 @@ def _lexical_candidates(
             """
         )
 
+        statement = prepare_statement(
+            statement
+        )
+
+        params = add_source_params(
+            {
+                "identifier_prefix": (
+                    compound_identifier
+                    .prefix
+                ),
+                "identifier_pattern": (
+                    identifier_pattern
+                ),
+                "source_type": (
+                    source_type
+                ),
+                "candidate_limit": (
+                    candidate_limit
+                ),
+            }
+        )
+
         try:
             with SessionLocal() as session:
-                rows = session.execute(
-                    statement,
-                    {
-                        "identifier_prefix": (
-                            compound_identifier.prefix
-                        ),
-                        "identifier_pattern": (
-                            identifier_pattern
-                        ),
-                        "source_type": source_type,
-                        "candidate_limit": (
-                            candidate_limit
-                        ),
-                    },
-                ).mappings().all()
+                rows = (
+                    session.execute(
+                        statement,
+                        params,
+                    )
+                    .mappings()
+                    .all()
+                )
 
             return [
                 {
                     "rank": rank,
                     "chunk_id": row["id"],
                     "source_type": (
-                        row["source_type"]
+                        row[
+                            "source_type"
+                        ]
                     ),
                     "source_id": (
-                        row["source_id"]
+                        row[
+                            "source_id"
+                        ]
                     ),
                     "chunk_index": (
-                        row["chunk_index"]
+                        row[
+                            "chunk_index"
+                        ]
                     ),
-                    "text": row["text"],
+                    "text": (
+                        row["text"]
+                    ),
                     "score": float(
-                        row["lexical_score"]
+                        row[
+                            "lexical_score"
+                        ]
                         or 0.0
                     ),
                 }
@@ -396,30 +907,56 @@ def _lexical_candidates(
 
         except Exception as exc:
             return [], [
-                "Compound identifier lexical "
-                "search failed: "
-                f"{type(exc).__name__}: {exc}"
+                "Compound identifier "
+                "lexical search failed: "
+                f"{type(exc).__name__}: "
+                f"{exc}"
             ]
+
+    # ================================================================
+    # Other identifiers / natural-language lexical search
+    # ================================================================
 
     relaxed_terms: list[str] = []
     seen_terms: set[str] = set()
-    for token in informative_query_tokens(query):
+
+    for token in (
+        informative_query_tokens(
+            query
+        )
+    ):
         for term in re.findall(
-            r"[0-9A-Za-zА-Яа-яЁё]+",
+            r"[^\W_]+",
             token,
+            flags=re.UNICODE,
         ):
             folded = term.casefold()
-            if len(folded) < 2 or folded in seen_terms:
+
+            if (
+                len(folded) < 2
+                or folded in seen_terms
+            ):
                 continue
-            seen_terms.add(folded)
-            relaxed_terms.append(
-                f"{folded}:*"
-                if len(folded) >= 4
-                and not folded.isdigit()
-                else folded
+
+            seen_terms.add(
+                folded
             )
+
+            relaxed_terms.append(
+                (
+                    f"{folded}:*"
+                    if (
+                        len(folded) >= 4
+                        and not folded.isdigit()
+                    )
+                    else folded
+                )
+            )
+
     relaxed_query = (
-        " | ".join(relaxed_terms)
+        " | ".join(
+            relaxed_terms
+        )
         or "workmindnomatch"
     )
 
@@ -429,7 +966,10 @@ def _lexical_candidates(
                 ts_rank_cd(
                     to_tsvector(
                         'simple'::regconfig,
-                        COALESCE(chunks.text, ''::text)
+                        COALESCE(
+                            chunks.text,
+                            ''::text
+                        )
                     ),
                     search_query.strict_query,
                     32
@@ -437,45 +977,65 @@ def _lexical_candidates(
                 0.65 * ts_rank_cd(
                     to_tsvector(
                         'simple'::regconfig,
-                        COALESCE(chunks.text, ''::text)
+                        COALESCE(
+                            chunks.text,
+                            ''::text
+                        )
                     ),
                     search_query.relaxed_query,
                     32
                 )
             )
         """
+
         match_sql = """
             (
                 to_tsvector(
                     'simple'::regconfig,
-                    COALESCE(chunks.text, ''::text)
-                ) @@ search_query.strict_query
+                    COALESCE(
+                        chunks.text,
+                        ''::text
+                    )
+                )
+                @@ search_query.strict_query
+
                 OR
+
                 to_tsvector(
                     'simple'::regconfig,
-                    COALESCE(chunks.text, ''::text)
-                ) @@ search_query.relaxed_query
+                    COALESCE(
+                        chunks.text,
+                        ''::text
+                    )
+                )
+                @@ search_query.relaxed_query
             )
         """
+
     else:
-        # For natural-language hybrid queries semantic search supplies
-        # recall. The lexical channel remains strict to avoid broad OR
-        # matches on common words and numbers.
         score_sql = """
             ts_rank_cd(
                 to_tsvector(
                     'simple'::regconfig,
-                    COALESCE(chunks.text, ''::text)
+                    COALESCE(
+                        chunks.text,
+                        ''::text
+                    )
                 ),
                 search_query.strict_query,
                 32
             )
         """
+
         match_sql = """
             to_tsvector(
                 'simple'::regconfig,
-                COALESCE(chunks.text, ''::text)
-            ) @@ search_query.strict_query
+                COALESCE(
+                    chunks.text,
+                    ''::text
+                )
+            )
+            @@ search_query.strict_query
         """
 
     statement = text(
@@ -486,60 +1046,118 @@ def _lexical_candidates(
                     'simple'::regconfig,
                     :query
                 ) AS strict_query,
+
                 to_tsquery(
                     'simple'::regconfig,
                     :relaxed_query
                 ) AS relaxed_query
         )
+
         SELECT
             chunks.id,
             chunks.source_type,
             chunks.source_id,
             chunks.chunk_index,
             chunks.text,
-            {score_sql} AS lexical_score
-        FROM document_chunks AS chunks
+            {score_sql}
+                AS lexical_score
+
+        FROM document_chunks
+            AS chunks
+
         CROSS JOIN search_query
+
         WHERE
             {match_sql}
+
             AND (
                 :source_type = 'all'
-                OR chunks.source_type = :source_type
+                OR chunks.source_type
+                = :source_type
             )
-        ORDER BY lexical_score DESC, chunks.id
+
+            {source_id_filter_sql}
+
+        ORDER BY
+            lexical_score DESC,
+            chunks.id
+
         LIMIT :candidate_limit
         """
     )
+
+    statement = prepare_statement(
+        statement
+    )
+
+    params = add_source_params(
+        {
+            "query": query,
+            "relaxed_query": (
+                relaxed_query
+            ),
+            "source_type": (
+                source_type
+            ),
+            "candidate_limit": (
+                candidate_limit
+            ),
+        }
+    )
+
     try:
         with SessionLocal() as session:
-            rows = session.execute(
-                statement,
-                {
-                    "query": query,
-                    "relaxed_query": relaxed_query,
-                    "source_type": source_type,
-                    "candidate_limit": candidate_limit,
-                },
-            ).mappings().all()
+            rows = (
+                session.execute(
+                    statement,
+                    params,
+                )
+                .mappings()
+                .all()
+            )
+
         return [
             {
                 "rank": rank,
-                "chunk_id": row["id"],
-                "source_type": row["source_type"],
-                "source_id": row["source_id"],
-                "chunk_index": row["chunk_index"],
+                "chunk_id": (
+                    row["id"]
+                ),
+                "source_type": (
+                    row[
+                        "source_type"
+                    ]
+                ),
+                "source_id": (
+                    row["source_id"]
+                ),
+                "chunk_index": (
+                    row[
+                        "chunk_index"
+                    ]
+                ),
                 "text": row["text"],
                 "score": float(
-                    row["lexical_score"] or 0.0
+                    row[
+                        "lexical_score"
+                    ]
+                    or 0.0
                 ),
             }
-            for rank, row in enumerate(rows, start=1)
+            for rank, row
+            in enumerate(
+                rows,
+                start=1,
+            )
         ], []
+
     except Exception as exc:
         return [], [
-            "Lexical search channel failed and was skipped: "
-            f"{type(exc).__name__}: {exc}"
+            "Lexical search channel "
+            "failed and was skipped: "
+            f"{type(exc).__name__}: "
+            f"{exc}"
         ]
+
 
 def _enrich_sources(
     sources: dict[tuple[str, uuid.UUID], dict[str, Any]],
@@ -1100,12 +1718,34 @@ def search_hybrid(
         2000,
     )
 
-    warnings: list[str] = []
-    semantic_rows: list[dict[str, Any]] = []
-    lexical_rows: list[dict[str, Any]] = []
+    eligible_by_type = (
+        _metadata_eligible_source_ids(
+            source_type=clean_source_type,
+            sender=sender,
+            filename=filename,
+            date_from=start_date,
+            date_to=end_date,
+        )
+    )
 
-    identifier_query = is_identifier_query(
-        clean_query
+    eligible_source_ids = (
+        _flatten_eligible_source_ids(
+            eligible_by_type
+        )
+    )
+
+    warnings: list[str] = []
+    semantic_rows: list[
+        dict[str, Any]
+    ] = []
+    lexical_rows: list[
+        dict[str, Any]
+    ] = []
+
+    identifier_query = (
+        is_identifier_query(
+            clean_query
+        )
     )
 
     (
@@ -1113,17 +1753,23 @@ def search_hybrid(
         run_lexical,
     ) = _channel_plan(
         clean_mode,
-        identifier_query=identifier_query,
+        identifier_query=(
+            identifier_query
+        ),
     )
 
     if run_semantic:
-        semantic_rows, channel_warnings = (
-            _semantic_candidates(
-                query=clean_query,
-                source_type=clean_source_type,
-                candidate_limit=candidate_limit,
-                min_score=safe_min_score,
-            )
+        (
+            semantic_rows,
+            channel_warnings,
+        ) = _semantic_candidates(
+            query=clean_query,
+            source_type=clean_source_type,
+            candidate_limit=candidate_limit,
+            min_score=safe_min_score,
+            eligible_source_ids=(
+                eligible_source_ids
+            ),
         )
 
         warnings.extend(
@@ -1131,12 +1777,16 @@ def search_hybrid(
         )
 
     if run_lexical:
-        lexical_rows, channel_warnings = (
-            _lexical_candidates(
-                query=clean_query,
-                source_type=clean_source_type,
-                candidate_limit=candidate_limit,
-            )
+        (
+            lexical_rows,
+            channel_warnings,
+        ) = _lexical_candidates(
+            query=clean_query,
+            source_type=clean_source_type,
+            candidate_limit=candidate_limit,
+            eligible_source_ids=(
+                eligible_source_ids
+            ),
         )
 
         warnings.extend(
@@ -1206,7 +1856,7 @@ def search_hybrid(
         row_source_id = _safe_uuid(row["source_id"])
         if (
             row_source_type
-            not in {"email", "attachment"}
+            not in {"email", "attachment", "document"}
             or row_source_id is None
         ):
             continue
@@ -1246,6 +1896,8 @@ def search_hybrid(
 
     ranked: list[dict[str, Any]] = []
     quality_rejections: dict[str, int] = {}
+    metadata_filtered_source_count = 0
+
     for source in sources.values():
         if not _source_passes_filters(
             source,
@@ -1255,6 +1907,8 @@ def search_hybrid(
             date_to=end_date,
         ):
             continue
+
+        metadata_filtered_source_count += 1
 
         metadata = source["metadata"]
         metadata_text = "\n".join(
@@ -1478,7 +2132,7 @@ def search_hybrid(
             "lexical_chunks": len(lexical_rows),
             "unique_sources_before_filters": len(sources),
             "unique_sources_after_metadata_filters": (
-                len(sources)
+                metadata_filtered_source_count
             ),
             "unique_sources_after_quality_gate": len(ranked),
             "collapsed_thread_or_file_duplicates": (

@@ -50,13 +50,120 @@ def test_search_quality_gate_and_diversity_are_present() -> None:
     assert "primary_anchor_missing" in source
 
 
-def test_natural_language_lexical_search_is_strict() -> None:
-    source = Path(
-        "packages/search/hybrid.py"
-    ).read_text(encoding="utf-8")
-    assert "semantic search supplies" in source
-    assert "if identifier:" in source
+def test_natural_language_lexical_search_is_strict(
+    monkeypatch,
+) -> None:
+    import packages.search.hybrid as hybrid
 
+    captured: dict[str, object] = {}
+
+    class FakeResult:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return []
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(
+            self,
+            exc_type,
+            exc,
+            traceback,
+        ):
+            return None
+
+        def execute(
+            self,
+            statement,
+            params,
+        ):
+            captured["sql"] = str(statement)
+            captured["params"] = dict(params)
+
+            return FakeResult()
+
+    monkeypatch.setattr(
+        hybrid,
+        "_fts_index_available",
+        lambda: True,
+    )
+
+    monkeypatch.setattr(
+        hybrid,
+        "SessionLocal",
+        lambda: FakeSession(),
+    )
+
+    rows, warnings = (
+        hybrid._lexical_candidates(
+            query="project alpha",
+            source_type="all",
+            candidate_limit=50,
+        )
+    )
+
+    assert rows == []
+    assert warnings == []
+
+    sql = str(
+        captured["sql"]
+    )
+
+    params = captured[
+        "params"
+    ]
+
+    # Natural-language lexical retrieval must use
+    # the strict websearch query for both ranking
+    # and candidate matching.
+    assert (
+        "@@ search_query.strict_query"
+        in sql
+    )
+
+    # relaxed_query may still be constructed in the
+    # shared CTE for identifier support, but it must
+    # not participate in natural-language matching.
+    assert (
+        "@@ search_query.relaxed_query"
+        not in sql
+    )
+
+    assert (
+        "search_query.strict_query"
+        in sql
+    )
+
+    assert (
+        "ORDER BY"
+        in sql
+        and "lexical_score DESC"
+        in sql
+    )
+
+    assert (
+        "LIMIT"
+        in sql
+    )
+
+    assert (
+        params["query"]
+        == "project alpha"
+    )
+
+    assert (
+        params["source_type"]
+        == "all"
+    )
+
+    assert (
+        params["candidate_limit"]
+        == 50
+    )
 
 
 def test_cross_thread_excerpt_deduplication_is_present() -> None:
