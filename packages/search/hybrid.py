@@ -20,9 +20,11 @@ from packages.database.session import SessionLocal
 from packages.processing.embeddings import embed_texts
 from packages.search.qdrant import get_qdrant_client
 from packages.search.ranking import (
+    compound_identifier_match_span,
     informative_query_tokens,
     is_identifier_query,
     normalize_query,
+    parse_compound_identifier,
     primary_anchor_token,
     query_tokens,
     rank_signals,
@@ -247,6 +249,158 @@ def _lexical_candidates(
         ]
 
     identifier = is_identifier_query(query)
+    compound_identifier = (
+        parse_compound_identifier(query)
+        if identifier
+        else None
+    )
+
+    if compound_identifier is not None:
+        # PostgreSQL's FTS parser treats ASCII-hyphenated
+        # identifiers differently from most other separators.
+        #
+        # Example:
+        #     СТ-199
+        #
+        # may expose the prefix lexeme "ст" but not a separate
+        # numeric lexeme "199". Therefore `ст & 199` is not a
+        # reliable FTS condition for compound identifiers.
+        #
+        # Use the indexed prefix as the fast GIN prefilter and
+        # validate the complete identifier structure with a
+        # parameterized PostgreSQL regex.
+        #
+        # The Python structural matcher in ranking.py remains
+        # the final independent quality check.
+
+        identifier_pattern = (
+            r"(^|[^0-9A-Za-zА-Яа-яЁё_])"
+            + re.escape(
+                compound_identifier.prefix
+            )
+            + (
+                r"(?:"
+                r"[ \t\u00a0]*"
+                r"(?:[_‐-‒–—―-]|№)"
+                r"[ \t\u00a0]*"
+                r"|"
+                r"[ \t\u00a0]+"
+                r")"
+            )
+            + re.escape(
+                compound_identifier.number
+            )
+            + r"($|[^0-9A-Za-zА-Яа-яЁё_])"
+        )
+
+        statement = text(
+            """
+            WITH search_query AS (
+                SELECT
+                    plainto_tsquery(
+                        'simple'::regconfig,
+                        :identifier_prefix
+                    ) AS prefix_query
+            )
+            SELECT
+                chunks.id,
+                chunks.source_type,
+                chunks.source_id,
+                chunks.chunk_index,
+                chunks.text,
+                ts_rank_cd(
+                    to_tsvector(
+                        'simple'::regconfig,
+                        COALESCE(
+                            chunks.text,
+                            ''::text
+                        )
+                    ),
+                    search_query.prefix_query,
+                    32
+                ) AS lexical_score
+            FROM document_chunks AS chunks
+            CROSS JOIN search_query
+            WHERE
+                to_tsvector(
+                    'simple'::regconfig,
+                    COALESCE(
+                        chunks.text,
+                        ''::text
+                    )
+                )
+                @@ search_query.prefix_query
+
+                AND COALESCE(
+                    chunks.text,
+                    ''::text
+                ) ~* :identifier_pattern
+
+                AND (
+                    :source_type = 'all'
+                    OR chunks.source_type
+                    = :source_type
+                )
+
+            ORDER BY
+                lexical_score DESC,
+                chunks.id
+
+            LIMIT :candidate_limit
+            """
+        )
+
+        try:
+            with SessionLocal() as session:
+                rows = session.execute(
+                    statement,
+                    {
+                        "identifier_prefix": (
+                            compound_identifier.prefix
+                        ),
+                        "identifier_pattern": (
+                            identifier_pattern
+                        ),
+                        "source_type": source_type,
+                        "candidate_limit": (
+                            candidate_limit
+                        ),
+                    },
+                ).mappings().all()
+
+            return [
+                {
+                    "rank": rank,
+                    "chunk_id": row["id"],
+                    "source_type": (
+                        row["source_type"]
+                    ),
+                    "source_id": (
+                        row["source_id"]
+                    ),
+                    "chunk_index": (
+                        row["chunk_index"]
+                    ),
+                    "text": row["text"],
+                    "score": float(
+                        row["lexical_score"]
+                        or 0.0
+                    ),
+                }
+                for rank, row
+                in enumerate(
+                    rows,
+                    start=1,
+                )
+            ], []
+
+        except Exception as exc:
+            return [], [
+                "Compound identifier lexical "
+                "search failed: "
+                f"{type(exc).__name__}: {exc}"
+            ]
+
     relaxed_terms: list[str] = []
     seen_terms: set[str] = set()
     for token in informative_query_tokens(query):
@@ -594,31 +748,81 @@ def _excerpt(
     limit: int,
 ) -> str:
     clean = value.strip()
+
     if len(clean) <= limit:
         return clean
 
-    folded = clean.casefold()
-    normalized_query = normalize_query(query)
-    position = folded.find(normalized_query)
-    if position < 0:
-        positions = [
-            folded.find(token)
-            for token in query_tokens(query)
-            if folded.find(token) >= 0
-        ]
-        position = min(positions) if positions else 0
+    identifier_span = (
+        compound_identifier_match_span(
+            query,
+            clean,
+        )
+        if is_identifier_query(query)
+        else None
+    )
 
-    before = min(240, max(0, limit // 4))
-    start = max(0, position - before)
-    end = min(len(clean), start + limit)
+    if identifier_span is not None:
+        position = identifier_span[0]
+
+    else:
+        folded = clean.casefold()
+
+        normalized_query = normalize_query(
+            query
+        )
+
+        position = folded.find(
+            normalized_query
+        )
+
+        if position < 0:
+            positions = [
+                folded.find(token)
+                for token
+                in query_tokens(query)
+                if folded.find(token) >= 0
+            ]
+
+            position = (
+                min(positions)
+                if positions
+                else 0
+            )
+
+    before = min(
+        240,
+        max(
+            0,
+            limit // 4,
+        ),
+    )
+
+    start = max(
+        0,
+        position - before,
+    )
+
+    end = min(
+        len(clean),
+        start + limit,
+    )
+
     if end - start < limit:
-        start = max(0, end - limit)
+        start = max(
+            0,
+            end - limit,
+        )
 
-    excerpt = clean[start:end].strip()
+    excerpt = clean[
+        start:end
+    ].strip()
+
     if start > 0:
         excerpt = "… " + excerpt
+
     if end < len(clean):
         excerpt += " …"
+
     return excerpt
 
 
@@ -630,58 +834,119 @@ def _quality_gate(
     best_chunk_signals,
     min_score: float,
 ) -> tuple[bool, str | None]:
-    if min_score > 0 and signals.final < min_score:
+    if (
+        min_score > 0
+        and signals.final < min_score
+    ):
         return False, "below_min_score"
 
-    primary_anchor = primary_anchor_token(query)
+    identifier = is_identifier_query(
+        query
+    )
+
+    compound_identifier = (
+        parse_compound_identifier(query)
+        if identifier
+        else None
+    )
+
+    if compound_identifier is not None:
+        # A compound identifier must occur
+        # structurally as one identifier.
+        # Co-occurrence of the two tokens
+        # is explicitly insufficient.
+        if signals.exact >= 0.999:
+            return True, None
+
+        return (
+            False,
+            "identifier_structure_missing",
+        )
+
+    primary_anchor = (
+        primary_anchor_token(query)
+    )
+
     if (
         primary_anchor is not None
-        and best_chunk_signals.primary_anchor < 0.999
+        and best_chunk_signals.primary_anchor
+        < 0.999
         and signals.metadata < 0.999
     ):
-        return False, "primary_anchor_missing"
+        return (
+            False,
+            "primary_anchor_missing",
+        )
 
     informative_count = len(
-        informative_query_tokens(query)
+        informative_query_tokens(
+            query
+        )
     )
-    if is_identifier_query(query):
+
+    if identifier:
         if (
             signals.exact
-            or best_chunk_signals.coverage >= 0.45
-            or best_chunk_signals.lexical >= 0.40
+            or best_chunk_signals.coverage
+            >= 0.45
+            or best_chunk_signals.lexical
+            >= 0.40
         ):
             return True, None
-        return False, "weak_identifier_match"
+
+        return (
+            False,
+            "weak_identifier_match",
+        )
 
     if mode == "semantic":
         if (
-            best_chunk_signals.semantic >= 0.42
-            or best_chunk_signals.coverage >= 0.45
+            best_chunk_signals.semantic
+            >= 0.42
+            or best_chunk_signals.coverage
+            >= 0.45
             or signals.exact
         ):
             return True, None
-        return False, "weak_semantic_match"
+
+        return (
+            False,
+            "weak_semantic_match",
+        )
 
     if informative_count >= 5:
         if (
-            best_chunk_signals.coverage >= 0.34
+            best_chunk_signals.coverage
+            >= 0.34
             or (
-                best_chunk_signals.semantic >= 0.55
-                and best_chunk_signals.coverage >= 0.16
+                best_chunk_signals.semantic
+                >= 0.55
+                and best_chunk_signals.coverage
+                >= 0.16
             )
             or signals.exact
         ):
             return True, None
-        return False, "low_query_coverage"
+
+        return (
+            False,
+            "low_query_coverage",
+        )
 
     if informative_count >= 3:
         if (
-            best_chunk_signals.coverage >= 0.34
-            or best_chunk_signals.semantic >= 0.50
+            best_chunk_signals.coverage
+            >= 0.34
+            or best_chunk_signals.semantic
+            >= 0.50
             or signals.exact
         ):
             return True, None
-        return False, "low_query_coverage"
+
+        return (
+            False,
+            "low_query_coverage",
+        )
 
     return True, None
 
@@ -740,6 +1005,40 @@ def _diversity_key(
 ) -> tuple[str, str]:
     """Backward-compatible primary diversity key."""
     return _diversity_keys(item)[0]
+
+
+def _channel_plan(
+    mode: str,
+    *,
+    identifier_query: bool,
+) -> tuple[bool, bool]:
+    """
+    Return:
+        (run_semantic, run_lexical)
+
+    Identifier queries deliberately bypass
+    embeddings and use the lexical/exact path.
+    """
+    run_semantic = (
+        mode in {
+            "hybrid",
+            "semantic",
+        }
+        and not identifier_query
+    )
+
+    run_lexical = (
+        mode in {
+            "hybrid",
+            "lexical",
+        }
+        or identifier_query
+    )
+
+    return (
+        run_semantic,
+        run_lexical,
+    )
 
 
 def search_hybrid(
@@ -805,7 +1104,19 @@ def search_hybrid(
     semantic_rows: list[dict[str, Any]] = []
     lexical_rows: list[dict[str, Any]] = []
 
-    if clean_mode in {"hybrid", "semantic"}:
+    identifier_query = is_identifier_query(
+        clean_query
+    )
+
+    (
+        run_semantic,
+        run_lexical,
+    ) = _channel_plan(
+        clean_mode,
+        identifier_query=identifier_query,
+    )
+
+    if run_semantic:
         semantic_rows, channel_warnings = (
             _semantic_candidates(
                 query=clean_query,
@@ -814,9 +1125,12 @@ def search_hybrid(
                 min_score=safe_min_score,
             )
         )
-        warnings.extend(channel_warnings)
 
-    if clean_mode in {"hybrid", "lexical"}:
+        warnings.extend(
+            channel_warnings
+        )
+
+    if run_lexical:
         lexical_rows, channel_warnings = (
             _lexical_candidates(
                 query=clean_query,
@@ -824,7 +1138,10 @@ def search_hybrid(
                 candidate_limit=candidate_limit,
             )
         )
-        warnings.extend(channel_warnings)
+
+        warnings.extend(
+            channel_warnings
+        )
 
     sources: dict[
         tuple[str, uuid.UUID],
@@ -1154,9 +1471,7 @@ def search_hybrid(
         "query": clean_query,
         "mode": clean_mode,
         "source_type": clean_source_type,
-        "identifier_query": is_identifier_query(
-            clean_query
-        ),
+        "identifier_query": identifier_query,
         "count": len(final_results),
         "candidate_counts": {
             "semantic_chunks": len(semantic_rows),
