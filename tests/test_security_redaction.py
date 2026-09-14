@@ -906,4 +906,3 @@ def test_lease_token_response_exception_is_limited_to_batch_tool(
         ]
         == "[REDACTED:token]"
     )
-
