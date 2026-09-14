@@ -1,44 +1,140 @@
 from __future__ import annotations
 
 import functools
-import hashlib
+import inspect
 import logging
 import time
 from collections.abc import Callable
-from typing import Any, ParamSpec, TypeVar
+from typing import Any, ParamSpec, TypeVar, cast
 
 from packages.database.models import AgentActionLog
 from packages.database.session import SessionLocal
+from packages.security.redaction import redact_data, redact_text
 
 logger = logging.getLogger(__name__)
 P = ParamSpec("P")
 R = TypeVar("R")
 
 
-def _safe_value(value: Any) -> Any:
-    if value is None or isinstance(value, (bool, int, float)):
+def _safe_value(
+    value: Any,
+) -> Any:
+    if (
+        value is None
+        or isinstance(
+            value,
+            (
+                bool,
+                int,
+                float,
+            ),
+        )
+    ):
         return value
-    if isinstance(value, str):
-        return value[:2000]
-    if isinstance(value, (list, tuple)):
-        return [_safe_value(item) for item in value[:50]]
-    if isinstance(value, dict):
+
+    if isinstance(
+        value,
+        str,
+    ):
+        return redact_text(
+            value
+        )[:2000]
+
+    if isinstance(
+        value,
+        (
+            list,
+            tuple,
+        ),
+    ):
+        return [
+            _safe_value(
+                item
+            )
+            for item
+            in value[:50]
+        ]
+
+    if isinstance(
+        value,
+        dict,
+    ):
+        sanitized = (
+            redact_data(
+                value
+            )
+        )
+
         return {
-            str(key)[:128]: _safe_value(item)
-            for key, item in list(value.items())[:50]
+            str(
+                key
+            )[:128]: (
+                _safe_value(
+                    item
+                )
+            )
+            for (
+                key,
+                item,
+            ) in list(
+                sanitized.items()
+            )[:50]
         }
-    return repr(value)[:500]
+
+    return redact_text(
+        repr(
+            value
+        )
+    )[:500]
 
 
-def _redacted_text(value: Any) -> dict[str, Any]:
-    raw = str(value)
+def _redacted_text(
+    value: Any,
+) -> dict[str, Any]:
+    # Do not persist raw length or a hash of
+    # a potentially sensitive payload.
+    del value
+
     return {
         "redacted": True,
-        "length": len(raw),
-        "sha256": hashlib.sha256(
-            raw.encode("utf-8")
-        ).hexdigest(),
     }
+
+
+def _safe_named_value(
+    key: str,
+    value: Any,
+) -> Any:
+    """
+    Sanitize a value with knowledge of its parameter name.
+
+    This is required for opaque capabilities such as lease_token:
+    the token value itself may have no recognizable secret shape.
+    """
+
+    if key == "bundle_json":
+        return _redacted_text(
+            value
+        )
+
+    sanitized = redact_data(
+        {
+            key: value,
+        }
+    )
+
+    if isinstance(
+        sanitized,
+        dict,
+    ):
+        return _safe_value(
+            sanitized.get(
+                key
+            )
+        )
+
+    return _safe_value(
+        value
+    )
 
 
 def _request_payload(
@@ -46,27 +142,77 @@ def _request_payload(
     kwargs: dict[str, Any],
     *,
     tool_name: str,
+    parameter_names: tuple[
+        str,
+        ...,
+    ] = (),
 ) -> dict[str, Any]:
+    """
+    Build a sanitized audit representation of MCP input.
+
+    Parameter names are used when available so opaque secrets
+    are redacted even when their value has no recognizable shape.
+    """
+
     redact_positional_bundle = (
-        tool_name == "extract_workmind_knowledge"
+        tool_name
+        == "extract_workmind_knowledge"
     )
-    payload: dict[str, Any] = {
-        "args": [
-            _redacted_text(item)
-            if redact_positional_bundle and index == 0
-            else _safe_value(item)
-            for index, item in enumerate(args)
-        ],
-        "kwargs": {
-            key: (
-                _redacted_text(value)
-                if key == "bundle_json"
-                else _safe_value(value)
+
+    safe_args: list[Any] = []
+
+    for index, item in enumerate(
+        args
+    ):
+        parameter_name = (
+            parameter_names[index]
+            if index
+            < len(
+                parameter_names
             )
-            for key, value in kwargs.items()
-        },
+            else None
+        )
+
+        if parameter_name is not None:
+            safe_args.append(
+                _safe_named_value(
+                    parameter_name,
+                    item,
+                )
+            )
+
+        elif (
+            redact_positional_bundle
+            and index == 0
+        ):
+            # Backward-compatible protection for direct
+            # _request_payload() callers without a signature.
+            safe_args.append(
+                _redacted_text(
+                    item
+                )
+            )
+
+        else:
+            safe_args.append(
+                _safe_value(
+                    item
+                )
+            )
+
+    safe_kwargs = {
+        key: _safe_named_value(
+            key,
+            value,
+        )
+        for key, value
+        in kwargs.items()
     }
-    return payload
+
+    return {
+        "args": safe_args,
+        "kwargs": safe_kwargs,
+    }
 
 
 def _response_summary(result: Any) -> tuple[dict[str, Any], int | None, str, str | None]:
@@ -131,7 +277,7 @@ def _write_log(
             "mcp_audit_write_failed",
             tool_name=tool_name,
             error_type=type(exc).__name__,
-            error=str(exc),
+            error=redact_text(str(exc)),
         )
 
 
@@ -139,6 +285,21 @@ def audited_tool(
     tool_name: str,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
     def decorator(func: Callable[P, R]) -> Callable[P, R]:
+        parameter_names = tuple(
+            inspect.signature(
+                func
+            ).parameters
+        )
+
+        response_allowed_keys = (
+            {
+                "lease_token",
+            }
+            if tool_name
+            == "get_workmind_extraction_batch"
+            else set()
+        )
+
         @functools.wraps(func)
         def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
             started = time.perf_counter()
@@ -146,15 +307,35 @@ def audited_tool(
                 args,
                 kwargs,
                 tool_name=tool_name,
+                parameter_names=parameter_names,
             )
             try:
-                result = func(*args, **kwargs)
+                raw_result = func(*args, **kwargs)
+
+                # audited_tool sits inside @mcp.tool(),
+                # so this is the common outbound MCP boundary.
+                #
+                # lease_token is a required WorkMind protocol
+                # capability: clients need it for validate/release.
+                # It is allowed only in MCP responses. Audit logs
+                # and remote provider packets remain strict.
+                result = cast(
+                    R,
+                    redact_data(
+                        raw_result,
+                        allowed_keys=(
+                            response_allowed_keys
+                        ),
+                    ),
+                )
+
                 (
                     summary,
                     result_count,
                     status,
                     error_type,
                 ) = _response_summary(result)
+
                 return result
             except Exception as exc:
                 summary = {
@@ -164,7 +345,20 @@ def audited_tool(
                 result_count = None
                 status = "error"
                 error_type = type(exc).__name__
-                raise
+
+                # Unexpected exceptions cross the MCP boundary too.
+                # Never re-raise their original potentially sensitive
+                # message. Preserve the original error type in audit
+                # metadata, but expose only the sanitized message.
+                safe_message = redact_text(
+                    str(
+                        exc
+                    )
+                )
+
+                raise RuntimeError(
+                    safe_message
+                ) from None
             finally:
                 duration_ms = max(
                     0,

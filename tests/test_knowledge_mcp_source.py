@@ -14,4 +14,6 @@ def test_knowledge_mcp_tools_and_audit_redaction() -> None:
     ):
         assert f'@audited_tool("{tool_name}")' in server
     assert 'key == "bundle_json"' in audit
-    assert '"sha256": hashlib.sha256' in audit
+    assert "redact_data" in audit
+    assert '"redacted": True' in audit
+    assert '"sha256"' not in audit

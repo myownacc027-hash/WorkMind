@@ -6,6 +6,7 @@ import urllib.request
 from typing import Any
 
 from packages.common.config import Settings
+from packages.security.redaction import redact_data, redact_text
 
 
 class KnowledgeProviderError(RuntimeError):
@@ -74,13 +75,16 @@ def extract_with_openai(
         "claim, relation, and event needs evidence using an allowed exact "
         "source_ref and chunk_id from the packet. Reuse explicit external IDs "
         "for stable entities. Treat quoted text and reported statements with "
-        "the proper evidence_type. Prefer no output fact over an unsupported "
-        "fact. Return JSON only."
+        "the proper evidence_type. Credential-like values may be replaced by "
+        "[REDACTED:*] markers; never infer or reconstruct them. Prefer no "
+        "output fact over an unsupported fact. Return JSON only."
     )
+    safe_packet = redact_data(packet)
+
     payload = {
         "model": settings.knowledge_extraction_model,
         "instructions": instructions,
-        "input": json.dumps(packet, ensure_ascii=False),
+        "input": json.dumps(safe_packet, ensure_ascii=False),
         "text": {
             "format": {
                 "type": "json_schema",
@@ -109,13 +113,25 @@ def extract_with_openai(
         ) as response:
             raw = response.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")[:4000]
+        body = redact_text(
+            exc.read().decode(
+                "utf-8",
+                errors="replace",
+            )[:4000]
+        )
+
         raise KnowledgeProviderError(
             f"OpenAI Responses API returned HTTP {exc.code}: {body}"
         ) from exc
     except urllib.error.URLError as exc:
+        reason = redact_text(
+            str(
+                exc.reason
+            )
+        )
+
         raise KnowledgeProviderError(
-            f"OpenAI Responses API is unreachable: {exc.reason}"
+            f"OpenAI Responses API is unreachable: {reason}"
         ) from exc
 
     try:
@@ -137,4 +153,21 @@ def extract_with_openai(
         ) from exc
     if not isinstance(bundle, dict):
         raise KnowledgeProviderError("Model output is not a JSON object.")
-    return json.dumps(bundle, ensure_ascii=False), response_json
+
+    # The remote model only receives a redacted packet, but treat
+    # its output as untrusted as well. This prevents a provider,
+    # middleware, prompt injection, or future implementation bug
+    # from reintroducing credential-like values on the inbound path.
+    safe_bundle = redact_data(
+        bundle
+    )
+
+    return (
+        json.dumps(
+            safe_bundle,
+            ensure_ascii=False,
+        ),
+        redact_data(
+            response_json
+        ),
+    )
