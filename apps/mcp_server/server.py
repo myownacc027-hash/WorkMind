@@ -131,16 +131,34 @@ def get_workmind_context_bundle(
     source_ref_or_id: str,
     source_type: str | None = None,
     include_thread: bool = True,
-    max_body_chars: int = 30_000,
-    max_attachment_text_chars: int = 100_000,
-    max_body_chars_per_thread_message: int = 12_000,
+    max_body_chars: int = 6_000,
+    max_attachment_text_chars: int = 12_000,
+    max_body_chars_per_thread_message: int = 2_000,
+    max_thread_messages: int = 8,
     query: str | None = None,
     evidence_limit: int = 5,
 ) -> dict[str, Any]:
-    """Load a source, its parent/thread context, and evidence excerpts.
+    """Load a compact source context with bounded thread and provenance.
 
-    Pass the original search query so evidence_candidates contains the
-    most relevant chunk IDs and excerpts for verification.
+    Pass the original search query so evidence_candidates contains
+    the most relevant chunk IDs and excerpts for verification.
+
+    The context bundle is intentionally compact. For larger/raw content
+    use get_email_by_id, get_email_thread, get_attachment_by_id, or
+    get_document_by_id.
+
+    Args:
+        source_ref_or_id: WorkMind source_ref or source UUID.
+        source_type: email, attachment, document, or auto-detect.
+        include_thread: Include bounded conversation context.
+        max_body_chars: Requested source-email ceiling; hard-capped at 6000.
+        max_attachment_text_chars: Requested attachment/document ceiling;
+            hard-capped at 12000.
+        max_body_chars_per_thread_message: Requested per-message ceiling;
+            hard-capped at 2000.
+        max_thread_messages: Requested thread window; hard-capped at 8.
+        query: Original search query used to rank evidence excerpts.
+        evidence_limit: Maximum target-source evidence candidates.
     """
     try:
         return get_workmind_context(
@@ -148,9 +166,14 @@ def get_workmind_context_bundle(
             source_type=source_type,
             include_thread=include_thread,
             max_body_chars=max_body_chars,
-            max_attachment_text_chars=max_attachment_text_chars,
+            max_attachment_text_chars=(
+                max_attachment_text_chars
+            ),
             max_body_chars_per_thread_message=(
                 max_body_chars_per_thread_message
+            ),
+            max_thread_messages=(
+                max_thread_messages
             ),
             query=query,
             evidence_limit=evidence_limit,

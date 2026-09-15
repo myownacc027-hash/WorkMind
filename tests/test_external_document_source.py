@@ -1,3 +1,4 @@
+import ast
 from pathlib import Path
 
 
@@ -28,7 +29,41 @@ def test_document_source_is_supported_by_search_and_mcp() -> None:
     assert '"document"' in hybrid
     assert 'workmind://document/' in hybrid
     assert 'def get_external_document(' in services
-    assert 'raw.startswith("workmind://document/")' in services
+    services_tree = ast.parse(
+        services
+    )
+
+    assert any(
+        isinstance(
+            node,
+            ast.Call,
+        )
+        and isinstance(
+            node.func,
+            ast.Attribute,
+        )
+        and node.func.attr
+        == "startswith"
+        and isinstance(
+            node.func.value,
+            ast.Name,
+        )
+        and node.func.value.id
+        == "raw"
+        and len(
+            node.args
+        )
+        >= 1
+        and isinstance(
+            node.args[0],
+            ast.Constant,
+        )
+        and node.args[0].value
+        == "workmind://document/"
+        for node in ast.walk(
+            services_tree
+        )
+    )
     assert '@audited_tool("get_document_by_id")' in server
 
 

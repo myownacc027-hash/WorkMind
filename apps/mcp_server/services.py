@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
@@ -1010,37 +1011,1250 @@ def _evidence_candidates(
     return result
 
 
+
+# ---------------------------------------------------------------------
+# Compact MCP context projection
+# ---------------------------------------------------------------------
+
+_CONTEXT_CONTRACT_VERSION = 2
+
+_CONTEXT_SOURCE_BODY_CAP = 6_000
+_CONTEXT_SOURCE_TEXT_CAP = 12_000
+_CONTEXT_THREAD_MESSAGE_CAP = 8
+_CONTEXT_THREAD_BODY_CAP = 2_000
+_CONTEXT_ATTACHMENT_METADATA_CAP = 20
+_CONTEXT_RECIPIENT_CAP = 20
+
+
+def _normalize_context_signature(
+    value: str | None,
+) -> str:
+    """
+    Normalize text only for exact context deduplication.
+
+    This does not modify archived source text.
+    """
+
+    text_value = (
+        value
+        or ""
+    )
+
+    text_value = (
+        text_value
+        .replace(
+            "\r\n",
+            "\n",
+        )
+        .replace(
+            "\r",
+            "\n",
+        )
+    )
+
+    text_value = re.sub(
+        r"(?m)^\s*>+\s?",
+        "",
+        text_value,
+    )
+
+    return re.sub(
+        r"\s+",
+        " ",
+        text_value,
+    ).strip().casefold()
+
+
+def _compact_attachment_metadata(
+    item: dict[str, Any],
+) -> dict[str, Any]:
+    """
+    Keep only agent-useful attachment metadata.
+
+    Local paths, hashes, processing errors and arbitrary metadata
+    stay available through the raw attachment tools.
+    """
+
+    return {
+        "attachment_id": item.get(
+            "attachment_id"
+        ),
+        "filename": item.get(
+            "filename"
+        ),
+        "mime_type": item.get(
+            "mime_type"
+        ),
+        "size_bytes": item.get(
+            "size_bytes"
+        ),
+        "processing_status": item.get(
+            "processing_status"
+        ),
+        "extracted_chars": item.get(
+            "extracted_chars"
+        ),
+        "page_count": item.get(
+            "page_count"
+        ),
+        "sheet_count": item.get(
+            "sheet_count"
+        ),
+        "processed_at": item.get(
+            "processed_at"
+        ),
+    }
+
+
+def _compact_attachment_list(
+    values: list[dict[str, Any]],
+    *,
+    exclude_attachment_id: str | None = None,
+) -> tuple[
+    list[dict[str, Any]],
+    int,
+]:
+    result: list[
+        dict[str, Any]
+    ] = []
+
+    omitted = 0
+
+    for item in values:
+        if (
+            exclude_attachment_id
+            and str(
+                item.get(
+                    "attachment_id"
+                )
+                or ""
+            )
+            == exclude_attachment_id
+        ):
+            continue
+
+        if (
+            len(
+                result
+            )
+            >= _CONTEXT_ATTACHMENT_METADATA_CAP
+        ):
+            omitted += 1
+            continue
+
+        result.append(
+            _compact_attachment_metadata(
+                item
+            )
+        )
+
+    return (
+        result,
+        omitted,
+    )
+
+
+def _compact_email_payload(
+    value: dict[str, Any],
+    *,
+    body_limit: int,
+) -> dict[str, Any]:
+    body_text, truncated = _truncate(
+        value.get(
+            "body_text"
+        ),
+        min(
+            int(
+                body_limit
+            ),
+            _CONTEXT_SOURCE_BODY_CAP,
+        ),
+    )
+
+    attachments, attachments_omitted = (
+        _compact_attachment_list(
+            list(
+                value.get(
+                    "attachments"
+                )
+                or []
+            )
+        )
+    )
+
+    recipients = list(
+        value.get(
+            "recipients"
+        )
+        or []
+    )
+
+    safe_recipients = (
+        recipients[
+            :_CONTEXT_RECIPIENT_CAP
+        ]
+    )
+
+    return {
+        "source_id": value.get(
+            "source_id"
+        ),
+        "source_ref": value.get(
+            "source_ref"
+        ),
+        "thread_id": value.get(
+            "thread_id"
+        ),
+        "conversation_id": value.get(
+            "conversation_id"
+        ),
+        "subject": value.get(
+            "subject"
+        ),
+        "sender_name": value.get(
+            "sender_name"
+        ),
+        "sender_email": value.get(
+            "sender_email"
+        ),
+        "date": value.get(
+            "date"
+        ),
+        "sent_at": value.get(
+            "sent_at"
+        ),
+        "received_at": value.get(
+            "received_at"
+        ),
+        "folder_path": value.get(
+            "folder_path"
+        ),
+        "has_attachments": value.get(
+            "has_attachments"
+        ),
+        "processing_status": value.get(
+            "processing_status"
+        ),
+        "body_text": body_text,
+        "body_truncated": (
+            bool(
+                value.get(
+                    "body_truncated"
+                )
+            )
+            or truncated
+        ),
+        "recipients": safe_recipients,
+        "recipients_omitted": max(
+            0,
+            len(
+                recipients
+            )
+            - len(
+                safe_recipients
+            ),
+        ),
+        "attachment_count": len(
+            list(
+                value.get(
+                    "attachments"
+                )
+                or []
+            )
+        ),
+        "attachments": attachments,
+        "attachments_omitted": attachments_omitted,
+    }
+
+
+def _compact_attachment_payload(
+    value: dict[str, Any],
+    *,
+    text_limit: int,
+) -> dict[str, Any]:
+    extracted_text, truncated = _truncate(
+        value.get(
+            "extracted_text"
+        ),
+        min(
+            int(
+                text_limit
+            ),
+            _CONTEXT_SOURCE_TEXT_CAP,
+        ),
+    )
+
+    result = (
+        _compact_attachment_metadata(
+            value
+        )
+    )
+
+    result.update(
+        {
+            "source_id": value.get(
+                "source_id"
+            ),
+            "source_ref": value.get(
+                "source_ref"
+            ),
+            "parent_source_id": value.get(
+                "parent_source_id"
+            ),
+            "parent_source_ref": value.get(
+                "parent_source_ref"
+            ),
+            "subject": value.get(
+                "subject"
+            ),
+            "sender_name": value.get(
+                "sender_name"
+            ),
+            "sender_email": value.get(
+                "sender_email"
+            ),
+            "date": value.get(
+                "date"
+            ),
+            "folder_path": value.get(
+                "folder_path"
+            ),
+            "extracted_text": extracted_text,
+            "text_truncated": (
+                bool(
+                    value.get(
+                        "text_truncated"
+                    )
+                )
+                or truncated
+            ),
+        }
+    )
+
+    return result
+
+
+def _compact_document_payload(
+    value: dict[str, Any],
+    *,
+    text_limit: int,
+) -> dict[str, Any]:
+    extracted_text, truncated = _truncate(
+        value.get(
+            "extracted_text"
+        ),
+        min(
+            int(
+                text_limit
+            ),
+            _CONTEXT_SOURCE_TEXT_CAP,
+        ),
+    )
+
+    return {
+        "document_id": value.get(
+            "document_id"
+        ),
+        "source_id": value.get(
+            "source_id"
+        ),
+        "source_ref": value.get(
+            "source_ref"
+        ),
+        "filename": value.get(
+            "filename"
+        ),
+        "mime_type": value.get(
+            "mime_type"
+        ),
+        "size_bytes": value.get(
+            "size_bytes"
+        ),
+        "source_date": value.get(
+            "source_date"
+        ),
+        "processing_status": value.get(
+            "processing_status"
+        ),
+        "extraction_method": value.get(
+            "extraction_method"
+        ),
+        "extracted_chars": value.get(
+            "extracted_chars"
+        ),
+        "page_count": value.get(
+            "page_count"
+        ),
+        "sheet_count": value.get(
+            "sheet_count"
+        ),
+        "slide_count": value.get(
+            "slide_count"
+        ),
+        "processed_at": value.get(
+            "processed_at"
+        ),
+        "extracted_text": extracted_text,
+        "text_truncated": (
+            bool(
+                value.get(
+                    "text_truncated"
+                )
+            )
+            or truncated
+        ),
+    }
+
+
+def _select_context_thread_positions(
+    total: int,
+    selected_index: int,
+    *,
+    limit: int,
+) -> list[int]:
+    """
+    Select a deterministic bounded thread window.
+
+    Priority:
+    - selected message and its local neighborhood;
+    - newest messages for latest status/context.
+
+    Returned positions are chronological.
+    """
+
+    if total <= 0:
+        return []
+
+    safe_limit = max(
+        1,
+        min(
+            int(
+                limit
+            ),
+            _CONTEXT_THREAD_MESSAGE_CAP,
+        ),
+    )
+
+    selected_index = max(
+        0,
+        min(
+            int(
+                selected_index
+            ),
+            total - 1,
+        ),
+    )
+
+    priorities: list[int] = []
+
+    for delta in (
+        -2,
+        -1,
+        0,
+        1,
+        2,
+    ):
+        candidate = (
+            selected_index
+            + delta
+        )
+
+        if (
+            0
+            <= candidate
+            < total
+        ):
+            priorities.append(
+                candidate
+            )
+
+    for candidate in range(
+        max(
+            0,
+            total - 3,
+        ),
+        total,
+    ):
+        priorities.append(
+            candidate
+        )
+
+    # Fill remaining slots around the selected message
+    # before considering arbitrary distant history.
+    radius = 3
+
+    while (
+        len(
+            set(
+                priorities
+            )
+        )
+        < safe_limit
+        and (
+            selected_index - radius >= 0
+            or selected_index + radius < total
+        )
+    ):
+        left = (
+            selected_index
+            - radius
+        )
+
+        right = (
+            selected_index
+            + radius
+        )
+
+        if left >= 0:
+            priorities.append(
+                left
+            )
+
+        if right < total:
+            priorities.append(
+                right
+            )
+
+        radius += 1
+
+    selected: list[int] = []
+
+    for candidate in priorities:
+        if (
+            candidate
+            not in selected
+        ):
+            selected.append(
+                candidate
+            )
+
+        if (
+            len(
+                selected
+            )
+            >= safe_limit
+        ):
+            break
+
+    return sorted(
+        selected
+    )
+
+
+def _compact_context_chunks(
+    chunks: list[DocumentChunk],
+    *,
+    source_ref: str,
+    char_limit: int,
+    seen_signatures: set[str],
+    emit_text: bool = True,
+) -> dict[str, Any]:
+    """
+    Build one compact text projection from indexed chunks.
+
+    Exact normalized chunks already seen earlier in the bounded
+    conversation are omitted. Every emitted fragment retains its
+    original chunk_id provenance.
+    """
+
+    safe_limit = max(
+        0,
+        min(
+            int(
+                char_limit
+            ),
+            _CONTEXT_THREAD_BODY_CAP,
+        ),
+    )
+
+    pieces: list[str] = []
+    chunk_refs: list[
+        dict[str, Any]
+    ] = []
+
+    used_chars = 0
+    duplicate_chunks = 0
+    duplicate_chars = 0
+    truncated = False
+
+    for chunk in chunks:
+        raw_text = (
+            chunk.text
+            or ""
+        )
+
+        signature = (
+            _normalize_context_signature(
+                raw_text
+            )
+        )
+
+        if not signature:
+            continue
+
+        if (
+            signature
+            in seen_signatures
+        ):
+            duplicate_chunks += 1
+            duplicate_chars += len(
+                raw_text
+            )
+            truncated = True
+            continue
+
+        # A chunk may participate in exact deduplication only
+        # after its FULL text has actually been emitted.
+        #
+        # Do not seed the seen set from:
+        # - the selected thread message whose body is intentionally
+        #   omitted here;
+        # - a chunk skipped because the output budget is exhausted;
+        # - a partially emitted chunk.
+        #
+        # Otherwise later context could disappear merely because an
+        # earlier copy existed in source data but was never visible
+        # to the MCP/LLM consumer.
+        if not emit_text:
+            continue
+
+        if safe_limit <= 0:
+            truncated = True
+            continue
+
+        separator_chars = (
+            2
+            if pieces
+            else 0
+        )
+
+        remaining = (
+            safe_limit
+            - used_chars
+            - separator_chars
+        )
+
+        if remaining <= 0:
+            truncated = True
+            continue
+
+        excerpt = (
+            raw_text[
+                :remaining
+            ]
+        )
+
+        fully_emitted = (
+            len(
+                excerpt
+            )
+            == len(
+                raw_text
+            )
+        )
+
+        if not fully_emitted:
+            truncated = True
+
+        if not excerpt:
+            continue
+
+        pieces.append(
+            excerpt
+        )
+
+        used_chars += (
+            separator_chars
+            + len(
+                excerpt
+            )
+        )
+
+        chunk_refs.append(
+            {
+                "chunk_id": str(
+                    chunk.id
+                ),
+                "chunk_index": (
+                    chunk.chunk_index
+                ),
+                "source_ref": (
+                    source_ref
+                ),
+            }
+        )
+
+        if fully_emitted:
+            seen_signatures.add(
+                signature
+            )
+
+    return {
+        "body_text": "\n\n".join(
+            pieces
+        ),
+        "body_truncated": truncated,
+        "chunk_refs": chunk_refs,
+        "duplicate_chunks_omitted": duplicate_chunks,
+        "duplicate_chars_omitted": duplicate_chars,
+    }
+
+
+def _compact_context_raw_body(
+    raw_body: str | None,
+    *,
+    char_limit: int,
+    seen_signatures: set[str],
+    emit_text: bool = True,
+) -> dict[str, Any]:
+    """
+    Compact a raw email body when indexed chunks are unavailable.
+
+    The exact-dedup seen set may contain only text that was fully
+    emitted to the consumer. Hidden, skipped, or partially emitted
+    raw bodies must not suppress a later complete copy.
+    """
+
+    value = (
+        raw_body
+        or ""
+    )
+
+    signature = (
+        _normalize_context_signature(
+            value
+        )
+    )
+
+    if (
+        signature
+        and signature
+        in seen_signatures
+    ):
+        return {
+            "body_text": "",
+            "body_truncated": bool(
+                value
+            ),
+            "chunk_refs": [],
+            "duplicate_chunks_omitted": 1,
+            "duplicate_chars_omitted": len(
+                value
+            ),
+        }
+
+    if not emit_text:
+        return {
+            "body_text": "",
+            "body_truncated": bool(
+                value
+            ),
+            "chunk_refs": [],
+            "duplicate_chunks_omitted": 0,
+            "duplicate_chars_omitted": 0,
+        }
+
+    body_text, body_truncated = (
+        _truncate(
+            value,
+            char_limit,
+        )
+    )
+
+    fully_emitted = (
+        len(
+            body_text
+        )
+        == len(
+            value
+        )
+    )
+
+    if (
+        signature
+        and fully_emitted
+    ):
+        seen_signatures.add(
+            signature
+        )
+
+    return {
+        "body_text": body_text,
+        "body_truncated": (
+            body_truncated
+        ),
+        "chunk_refs": [],
+        "duplicate_chunks_omitted": 0,
+        "duplicate_chars_omitted": 0,
+    }
+
+
+def _compact_thread_context(
+    source_id: uuid.UUID,
+    *,
+    max_messages: int,
+    max_body_chars_per_message: int,
+) -> dict[str, Any] | None:
+    """
+    Load a bounded thread projection directly from PostgreSQL.
+
+    It intentionally does not call get_thread(), because get_thread()
+    loads every full message in conversations that may contain
+    hundreds of emails.
+    """
+
+    safe_message_limit = max(
+        1,
+        min(
+            int(
+                max_messages
+            ),
+            _CONTEXT_THREAD_MESSAGE_CAP,
+        ),
+    )
+
+    safe_body_limit = max(
+        300,
+        min(
+            int(
+                max_body_chars_per_message
+            ),
+            _CONTEXT_THREAD_BODY_CAP,
+        ),
+    )
+
+    with SessionLocal() as session:
+        selected = session.get(
+            EmailMessage,
+            source_id,
+        )
+
+        if selected is None:
+            raise WorkMindQueryError(
+                f"Email not found: {source_id}"
+            )
+
+        if selected.thread_id is None:
+            ordered_message_ids = [
+                selected.id
+            ]
+
+            thread = None
+
+        else:
+            thread = session.get(
+                EmailThread,
+                selected.thread_id,
+            )
+
+            occurred = func.coalesce(
+                EmailMessage.received_at,
+                EmailMessage.sent_at,
+            )
+
+            # Scan only IDs for the whole thread.
+            #
+            # Some Outlook conversations contain hundreds of
+            # messages and very large quoted-history bodies.
+            # Loading full EmailMessage ORM rows here would defeat
+            # the compact-context memory/DB-I/O boundary even though
+            # only a maximum of eight messages are returned.
+            ordered_message_ids = list(
+                session.scalars(
+                    select(
+                        EmailMessage.id
+                    )
+                    .where(
+                        EmailMessage.thread_id
+                        == selected.thread_id
+                    )
+                    .order_by(
+                        occurred
+                        .asc()
+                        .nullsfirst(),
+                        EmailMessage.id.asc(),
+                    )
+                )
+            )
+
+        try:
+            selected_index = (
+                ordered_message_ids.index(
+                    selected.id
+                )
+            )
+        except ValueError:
+            raise WorkMindQueryError(
+                "Selected email is missing from its thread."
+            )
+
+        positions = (
+            _select_context_thread_positions(
+                len(
+                    ordered_message_ids
+                ),
+                selected_index,
+                limit=safe_message_limit,
+            )
+        )
+
+        chosen_ids = [
+            ordered_message_ids[
+                position
+            ]
+            for position in positions
+        ]
+
+        # Only now load complete EmailMessage rows, and only for the
+        # bounded set actually selected for the compact projection.
+        chosen_rows = list(
+            session.scalars(
+                select(
+                    EmailMessage
+                )
+                .where(
+                    EmailMessage.id.in_(
+                        chosen_ids
+                    )
+                )
+            )
+        )
+
+        chosen_by_id = {
+            item.id: item
+            for item in chosen_rows
+        }
+
+        chosen = [
+            chosen_by_id[
+                item_id
+            ]
+            for item_id in chosen_ids
+            if item_id
+            in chosen_by_id
+        ]
+
+        chunk_rows = list(
+            session.scalars(
+                select(
+                    DocumentChunk
+                )
+                .where(
+                    DocumentChunk.source_type
+                    == "email",
+                    DocumentChunk.source_id.in_(
+                        chosen_ids
+                    ),
+                    DocumentChunk.embedding_status
+                    == "indexed",
+                )
+                .order_by(
+                    DocumentChunk.source_id,
+                    DocumentChunk.chunk_index,
+                )
+            )
+        )
+
+        chunks_by_source: dict[
+            uuid.UUID,
+            list[DocumentChunk],
+        ] = {}
+
+        for chunk in chunk_rows:
+            chunks_by_source.setdefault(
+                chunk.source_id,
+                [],
+            ).append(
+                chunk
+            )
+
+        seen_signatures: set[str] = set()
+
+        messages: list[
+            dict[str, Any]
+        ] = []
+
+        duplicate_chunks = 0
+        duplicate_chars = 0
+
+        for item in chosen:
+            is_selected = (
+                item.id
+                == selected.id
+            )
+
+            source_ref = (
+                _source_ref(
+                    item.id
+                )
+            )
+
+            chunks = (
+                chunks_by_source.get(
+                    item.id,
+                    [],
+                )
+            )
+
+            if chunks:
+                projection = (
+                    _compact_context_chunks(
+                        chunks,
+                        source_ref=source_ref,
+                        char_limit=(
+                            safe_body_limit
+                        ),
+                        seen_signatures=(
+                            seen_signatures
+                        ),
+                        emit_text=(
+                            not is_selected
+                        ),
+                    )
+                )
+
+            else:
+                projection = (
+                    _compact_context_raw_body(
+                        item.body_text,
+                        char_limit=(
+                            safe_body_limit
+                        ),
+                        seen_signatures=(
+                            seen_signatures
+                        ),
+                        emit_text=(
+                            not is_selected
+                        ),
+                    )
+                )
+
+            duplicate_chunks += int(
+                projection[
+                    "duplicate_chunks_omitted"
+                ]
+            )
+
+            duplicate_chars += int(
+                projection[
+                    "duplicate_chars_omitted"
+                ]
+            )
+
+            value = (
+                _message_summary(
+                    item
+                )
+            )
+
+            value.update(
+                {
+                    "selected_source": (
+                        is_selected
+                    ),
+                    "body_text": (
+                        projection[
+                            "body_text"
+                        ]
+                    ),
+                    "body_truncated": (
+                        projection[
+                            "body_truncated"
+                        ]
+                    ),
+                    "body_omitted_reason": (
+                        "selected_source"
+                        if is_selected
+                        else None
+                    ),
+                    "chunk_refs": (
+                        projection[
+                            "chunk_refs"
+                        ]
+                    ),
+                }
+            )
+
+            messages.append(
+                value
+            )
+
+        total_messages = len(
+            ordered_message_ids
+        )
+
+        return {
+            "thread_id": (
+                str(
+                    selected.thread_id
+                )
+                if selected.thread_id
+                else None
+            ),
+            "conversation_id": (
+                thread.conversation_id
+                if thread
+                else selected.conversation_id
+            ),
+            "subject_normalized": (
+                thread.subject_normalized
+                if thread
+                else None
+            ),
+            "message_count": total_messages,
+            "returned_message_count": len(
+                messages
+            ),
+            "messages_omitted": max(
+                0,
+                total_messages
+                - len(
+                    messages
+                ),
+            ),
+            "first_message_at": (
+                _iso(
+                    thread.first_message_at
+                )
+                if thread
+                else _iso(
+                    _occurred_at(
+                        selected
+                    )
+                )
+            ),
+            "last_message_at": (
+                _iso(
+                    thread.last_message_at
+                )
+                if thread
+                else _iso(
+                    _occurred_at(
+                        selected
+                    )
+                )
+            ),
+            "selected_source_id": str(
+                source_id
+            ),
+            "duplicate_chunks_omitted": (
+                duplicate_chunks
+            ),
+            "duplicate_chars_omitted": (
+                duplicate_chars
+            ),
+            "messages": messages,
+        }
+
+
+def _dedupe_context_evidence(
+    values: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """
+    Remove exact duplicate excerpts without changing provenance
+    of the first retained evidence candidate.
+    """
+
+    result: list[
+        dict[str, Any]
+    ] = []
+
+    seen: set[str] = set()
+
+    for item in values:
+        signature = (
+            _normalize_context_signature(
+                str(
+                    item.get(
+                        "excerpt"
+                    )
+                    or ""
+                )
+            )
+        )
+
+        if (
+            signature
+            and signature in seen
+        ):
+            continue
+
+        if signature:
+            seen.add(
+                signature
+            )
+
+        result.append(
+            item
+        )
+
+    return result
+
+
 def get_workmind_context(
     source_ref_or_id: str,
     *,
     source_type: str | None = None,
     include_thread: bool = True,
-    max_body_chars: int = 30_000,
-    max_attachment_text_chars: int = 100_000,
-    max_body_chars_per_thread_message: int = 12_000,
+    max_body_chars: int = 6_000,
+    max_attachment_text_chars: int = 12_000,
+    max_body_chars_per_thread_message: int = 2_000,
+    max_thread_messages: int = 8,
     query: str | None = None,
     evidence_limit: int = 5,
     evidence_excerpt_chars: int = 1600,
 ) -> dict[str, Any]:
-    """Return the source, parent email, thread, and sibling attachments."""
-    raw = source_ref_or_id.strip()
+    """
+    Return a compact, provenance-preserving context projection.
+
+    This tool is intentionally bounded for MCP/LLM use.
+    Use get_email_by_id, get_email_thread, get_attachment_by_id,
+    or get_document_by_id when full raw source content is required.
+    """
+
+    raw = (
+        source_ref_or_id.strip()
+    )
+
     if not raw:
         raise WorkMindQueryError(
             "source_ref_or_id must not be empty"
         )
 
-    detected_type = source_type.strip().lower() if source_type else None
-    if raw.startswith("workmind://email/"):
-        detected_type = "email"
-        raw = raw.removeprefix("workmind://email/")
-    elif raw.startswith("workmind://attachment/"):
-        detected_type = "attachment"
-        raw = raw.removeprefix("workmind://attachment/")
-    elif raw.startswith("workmind://document/"):
-        detected_type = "document"
-        raw = raw.removeprefix("workmind://document/")
+    detected_type = (
+        source_type.strip().lower()
+        if source_type
+        else None
+    )
 
-    source_id = _uuid(raw)
+    if raw.startswith(
+        "workmind://email/"
+    ):
+        detected_type = "email"
+        raw = raw.removeprefix(
+            "workmind://email/"
+        )
+
+    elif raw.startswith(
+        "workmind://attachment/"
+    ):
+        detected_type = "attachment"
+        raw = raw.removeprefix(
+            "workmind://attachment/"
+        )
+
+    elif raw.startswith(
+        "workmind://document/"
+    ):
+        detected_type = "document"
+        raw = raw.removeprefix(
+            "workmind://document/"
+        )
+
+    source_id = _uuid(
+        raw
+    )
+
     if detected_type not in {
         None,
         "email",
@@ -1053,65 +2267,248 @@ def get_workmind_context(
 
     if detected_type is None:
         with SessionLocal() as session:
-            if session.get(ExternalDocument, source_id) is not None:
+            if (
+                session.get(
+                    ExternalDocument,
+                    source_id,
+                )
+                is not None
+            ):
                 detected_type = "document"
-            elif session.get(Attachment, source_id) is not None:
+
+            elif (
+                session.get(
+                    Attachment,
+                    source_id,
+                )
+                is not None
+            ):
                 detected_type = "attachment"
-            elif session.get(EmailMessage, source_id) is not None:
+
+            elif (
+                session.get(
+                    EmailMessage,
+                    source_id,
+                )
+                is not None
+            ):
                 detected_type = "email"
+
             else:
                 raise WorkMindQueryError(
                     f"Source not found: {source_id}"
                 )
 
+    safe_body_limit = max(
+        500,
+        min(
+            int(
+                max_body_chars
+            ),
+            _CONTEXT_SOURCE_BODY_CAP,
+        ),
+    )
+
+    safe_text_limit = max(
+        1_000,
+        min(
+            int(
+                max_attachment_text_chars
+            ),
+            _CONTEXT_SOURCE_TEXT_CAP,
+        ),
+    )
+
+    safe_thread_body_limit = max(
+        300,
+        min(
+            int(
+                max_body_chars_per_thread_message
+            ),
+            _CONTEXT_THREAD_BODY_CAP,
+        ),
+    )
+
+    safe_thread_messages = max(
+        1,
+        min(
+            int(
+                max_thread_messages
+            ),
+            _CONTEXT_THREAD_MESSAGE_CAP,
+        ),
+    )
+
     if detected_type == "email":
-        email = get_email(
-            str(source_id),
-            max_body_chars=max_body_chars,
+        full_email = get_email(
+            str(
+                source_id
+            ),
+            max_body_chars=(
+                safe_body_limit
+            ),
             include_html=False,
         )
+
+        email = (
+            _compact_email_payload(
+                full_email,
+                body_limit=(
+                    safe_body_limit
+                ),
+            )
+        )
+
         thread = (
-            get_thread(
-                str(source_id),
+            _compact_thread_context(
+                source_id,
+                max_messages=(
+                    safe_thread_messages
+                ),
                 max_body_chars_per_message=(
-                    max_body_chars_per_thread_message
+                    safe_thread_body_limit
                 ),
             )
             if include_thread
             else None
         )
+
+        evidence = (
+            _dedupe_context_evidence(
+                _evidence_candidates(
+                    source_type="email",
+                    source_id=source_id,
+                    query=query,
+                    limit=evidence_limit,
+                    excerpt_chars=(
+                        evidence_excerpt_chars
+                    ),
+                    subject=email.get(
+                        "subject"
+                    ),
+                    sender_email=email.get(
+                        "sender_email"
+                    ),
+                )
+            )
+        )
+
+        sibling_attachments = list(
+            email.get(
+                "attachments"
+            )
+            or []
+        )
+
         return {
+            "context_contract_version": (
+                _CONTEXT_CONTRACT_VERSION
+            ),
+            "context_mode": "compact",
             "source_type": "email",
-            "source_id": str(source_id),
-            "source_ref": f"workmind://email/{source_id}",
+            "source_id": str(
+                source_id
+            ),
+            "source_ref": (
+                f"workmind://email/{source_id}"
+            ),
             "email": email,
             "attachment": None,
-            "sibling_attachments": email["attachments"],
-            "thread": thread,
-            "evidence_candidates": _evidence_candidates(
-                source_type="email",
-                source_id=source_id,
-                query=query,
-                limit=evidence_limit,
-                excerpt_chars=evidence_excerpt_chars,
-                subject=email.get("subject"),
-                sender_email=email.get("sender_email"),
+            "document": None,
+            "sibling_attachments": (
+                sibling_attachments
             ),
+            "thread": thread,
+            "evidence_candidates": (
+                evidence
+            ),
+            "context_limits": {
+                "source_body_chars": (
+                    safe_body_limit
+                ),
+                "source_text_chars": (
+                    safe_text_limit
+                ),
+                "thread_messages": (
+                    safe_thread_messages
+                ),
+                "thread_body_chars_per_message": (
+                    safe_thread_body_limit
+                ),
+                "evidence_limit": max(
+                    1,
+                    min(
+                        int(
+                            evidence_limit
+                        ),
+                        20,
+                    ),
+                ),
+                "evidence_excerpt_chars": max(
+                    200,
+                    min(
+                        int(
+                            evidence_excerpt_chars
+                        ),
+                        5_000,
+                    ),
+                ),
+            },
             "evidence_note": (
-                "Classify each excerpt as a direct statement, indirect "
-                "report, notification, inference, or conflict before "
-                "using it in a conclusion."
+                "Use source_ref + chunk_id from evidence_candidates "
+                "or thread chunk_refs for provenance. "
+                "The selected source body is not repeated inside thread."
             ),
         }
 
     if detected_type == "document":
-        document = get_external_document(
-            str(source_id),
-            max_text_chars=max_attachment_text_chars,
+        full_document = (
+            get_external_document(
+                str(
+                    source_id
+                ),
+                max_text_chars=(
+                    safe_text_limit
+                ),
+            )
         )
+
+        document = (
+            _compact_document_payload(
+                full_document,
+                text_limit=(
+                    safe_text_limit
+                ),
+            )
+        )
+
+        evidence = (
+            _dedupe_context_evidence(
+                _evidence_candidates(
+                    source_type="document",
+                    source_id=source_id,
+                    query=query,
+                    limit=evidence_limit,
+                    excerpt_chars=(
+                        evidence_excerpt_chars
+                    ),
+                    subject=document.get(
+                        "filename"
+                    ),
+                    sender_email=None,
+                )
+            )
+        )
+
         return {
+            "context_contract_version": (
+                _CONTEXT_CONTRACT_VERSION
+            ),
+            "context_mode": "compact",
             "source_type": "document",
-            "source_id": str(source_id),
+            "source_id": str(
+                source_id
+            ),
             "source_ref": (
                 f"workmind://document/{source_id}"
             ),
@@ -1120,69 +2517,180 @@ def get_workmind_context(
             "email": None,
             "sibling_attachments": [],
             "thread": None,
-            "evidence_candidates": _evidence_candidates(
-                source_type="document",
-                source_id=source_id,
-                query=query,
-                limit=evidence_limit,
-                excerpt_chars=evidence_excerpt_chars,
-                subject=document.get("filename"),
-                sender_email=None,
+            "evidence_candidates": (
+                evidence
             ),
+            "context_limits": {
+                "source_text_chars": (
+                    safe_text_limit
+                ),
+                "evidence_limit": max(
+                    1,
+                    min(
+                        int(
+                            evidence_limit
+                        ),
+                        20,
+                    ),
+                ),
+            },
             "evidence_note": (
-                "Classify each excerpt as a direct statement, indirect "
-                "report, inference, or conflict before using it in a "
-                "conclusion."
+                "Use source_ref + chunk_id from evidence_candidates "
+                "for provenance. Use get_document_by_id for larger "
+                "raw extracted text."
             ),
         }
 
-    attachment = get_attachment(
-        str(source_id),
-        max_text_chars=max_attachment_text_chars,
+    full_attachment = (
+        get_attachment(
+            str(
+                source_id
+            ),
+            max_text_chars=(
+                safe_text_limit
+            ),
+        )
     )
-    parent_id = str(attachment["parent_source_id"])
-    email = get_email(
+
+    attachment = (
+        _compact_attachment_payload(
+            full_attachment,
+            text_limit=(
+                safe_text_limit
+            ),
+        )
+    )
+
+    parent_id = str(
+        full_attachment[
+            "parent_source_id"
+        ]
+    )
+
+    full_email = get_email(
         parent_id,
-        max_body_chars=max_body_chars,
+        max_body_chars=(
+            safe_body_limit
+        ),
         include_html=False,
     )
+
+    email = (
+        _compact_email_payload(
+            full_email,
+            body_limit=(
+                safe_body_limit
+            ),
+        )
+    )
+
+    parent_uuid = _uuid(
+        parent_id
+    )
+
     thread = (
-        get_thread(
-            parent_id,
+        _compact_thread_context(
+            parent_uuid,
+            max_messages=(
+                safe_thread_messages
+            ),
             max_body_chars_per_message=(
-                max_body_chars_per_thread_message
+                safe_thread_body_limit
             ),
         )
         if include_thread
         else None
     )
+
+    sibling_attachments, sibling_omitted = (
+        _compact_attachment_list(
+            list(
+                full_email.get(
+                    "attachments"
+                )
+                or []
+            ),
+            exclude_attachment_id=(
+                str(
+                    source_id
+                )
+            ),
+        )
+    )
+
+    evidence = (
+        _dedupe_context_evidence(
+            _evidence_candidates(
+                source_type="attachment",
+                source_id=source_id,
+                query=query,
+                limit=evidence_limit,
+                excerpt_chars=(
+                    evidence_excerpt_chars
+                ),
+                subject=email.get(
+                    "subject"
+                ),
+                sender_email=email.get(
+                    "sender_email"
+                ),
+            )
+        )
+    )
+
     return {
+        "context_contract_version": (
+            _CONTEXT_CONTRACT_VERSION
+        ),
+        "context_mode": "compact",
         "source_type": "attachment",
-        "source_id": str(source_id),
+        "source_id": str(
+            source_id
+        ),
         "source_ref": (
             f"workmind://attachment/{source_id}"
         ),
         "attachment": attachment,
         "email": email,
-        "sibling_attachments": [
-            item
-            for item in email["attachments"]
-            if item["attachment_id"] != str(source_id)
-        ],
-        "thread": thread,
-        "evidence_candidates": _evidence_candidates(
-            source_type="attachment",
-            source_id=source_id,
-            query=query,
-            limit=evidence_limit,
-            excerpt_chars=evidence_excerpt_chars,
-            subject=email.get("subject"),
-            sender_email=email.get("sender_email"),
+        "document": None,
+        "sibling_attachments": (
+            sibling_attachments
         ),
+        "sibling_attachments_omitted": (
+            sibling_omitted
+        ),
+        "thread": thread,
+        "evidence_candidates": (
+            evidence
+        ),
+        "context_limits": {
+            "source_body_chars": (
+                safe_body_limit
+            ),
+            "source_text_chars": (
+                safe_text_limit
+            ),
+            "thread_messages": (
+                safe_thread_messages
+            ),
+            "thread_body_chars_per_message": (
+                safe_thread_body_limit
+            ),
+            "evidence_limit": max(
+                1,
+                min(
+                    int(
+                        evidence_limit
+                    ),
+                    20,
+                ),
+            ),
+        },
         "evidence_note": (
-            "Classify each excerpt as a direct statement, indirect "
-            "report, notification, inference, or conflict before "
-            "using it in a conclusion."
+            "Use source_ref + chunk_id from evidence_candidates "
+            "or thread chunk_refs for provenance. "
+            "Use get_attachment_by_id/get_email_by_id/get_email_thread "
+            "when larger raw content is required."
         ),
     }
 
