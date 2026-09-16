@@ -842,4 +842,3 @@ def test_char_cap_at_full_batch_boundary_does_not_prefetch_next_batch(
     assert len(
         session.calls
     ) == 1
-
