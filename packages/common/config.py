@@ -192,7 +192,7 @@ class Settings(BaseSettings):
         validation_alias="KNOWLEDGE_EXTRACTION_MAX_CONTEXT_CHARS",
     )
     knowledge_extraction_max_chunks: int = Field(
-        default=80,
+        default=120,
         ge=5,
         le=500,
         validation_alias="KNOWLEDGE_EXTRACTION_MAX_CHUNKS",

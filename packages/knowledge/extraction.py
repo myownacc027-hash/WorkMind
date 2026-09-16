@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from collections.abc import Iterable, Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -703,6 +704,212 @@ def _allowed_source_metadata_evidence(
     return rows
 
 
+_PACKET_CHUNK_QUERY_BATCH_SIZE = 256
+
+
+def _iter_indexed_source_chunks(
+    session: Session,
+    *,
+    source_type: str,
+    source_id: uuid.UUID,
+    batch_size: int = _PACKET_CHUNK_QUERY_BATCH_SIZE,
+) -> Iterator[Any]:
+    """Yield indexed source chunks in bounded keyset-paginated batches."""
+
+    safe_batch_size = max(
+        1,
+        min(
+            int(
+                batch_size
+            ),
+            _PACKET_CHUNK_QUERY_BATCH_SIZE,
+        ),
+    )
+
+    last_chunk_index: int | None = None
+
+    while True:
+        statement = (
+            select(
+                DocumentChunk.id.label(
+                    "chunk_id"
+                ),
+                DocumentChunk.chunk_index.label(
+                    "chunk_index"
+                ),
+                DocumentChunk.text.label(
+                    "text"
+                ),
+            )
+            .where(
+                DocumentChunk.source_type
+                == source_type,
+                DocumentChunk.source_id
+                == source_id,
+                DocumentChunk.embedding_status
+                == "indexed",
+            )
+        )
+
+        if last_chunk_index is not None:
+            statement = (
+                statement.where(
+                    DocumentChunk.chunk_index
+                    > last_chunk_index
+                )
+            )
+
+        rows = (
+            session.execute(
+                statement
+                .order_by(
+                    DocumentChunk.chunk_index
+                )
+                .limit(
+                    safe_batch_size
+                )
+            )
+            .all()
+        )
+
+        if not rows:
+            return
+
+        for row in rows:
+            yield row
+
+        last_chunk_index = int(
+            rows[
+                -1
+            ].chunk_index
+        )
+
+        if (
+            len(
+                rows
+            )
+            < safe_batch_size
+        ):
+            return
+
+
+def _append_source_chunks(
+    rows: Iterable[Any],
+    *,
+    chunks: list[dict[str, Any]],
+    current_chars: int,
+    max_chunks: int,
+    max_context_chars: int,
+    source_ref: str,
+    source_type: str,
+    source_id: uuid.UUID,
+    source_date: str | None,
+) -> int:
+    """Append bounded evidence chunks with raw-exact same-source dedup.
+
+    Deduplication is intentionally scoped to one source. Identical text from
+    another source remains independently available as evidence because its
+    source/date provenance may be semantically meaningful.
+
+    Only a fully emitted chunk seeds duplicate suppression. This preserves the
+    invariant that text cannot disappear merely because an earlier occurrence
+    existed in storage but was not fully visible to the extractor.
+    """
+
+    chars = int(
+        current_chars
+    )
+
+    seen_texts: set[str] = set()
+
+    row_iterator = iter(
+        rows
+    )
+
+    while (
+        len(
+            chunks
+        )
+        < max_chunks
+        and chars
+        < max_context_chars
+    ):
+        try:
+            row = next(
+                row_iterator
+            )
+        except StopIteration:
+            break
+
+        remaining = (
+            max_context_chars
+            - chars
+        )
+
+        raw_text = (
+            row.text
+            or ""
+        )
+
+        if raw_text in seen_texts:
+            continue
+
+        emitted_text = (
+            raw_text[
+                :remaining
+            ]
+        )
+
+        chunks.append(
+            {
+                "chunk_id": str(
+                    row.chunk_id
+                ),
+                "source_ref": (
+                    source_ref
+                ),
+                "source_type": (
+                    source_type
+                ),
+                "source_id": str(
+                    source_id
+                ),
+                "source_date": (
+                    source_date
+                ),
+                "chunk_index": int(
+                    row.chunk_index
+                ),
+                "text": (
+                    emitted_text
+                ),
+            }
+        )
+
+        chars += len(
+            emitted_text
+        )
+
+        fully_emitted = (
+            len(
+                emitted_text
+            )
+            == len(
+                raw_text
+            )
+        )
+
+        if fully_emitted:
+            seen_texts.add(
+                raw_text
+            )
+
+        if not fully_emitted:
+            break
+
+    return chars
+
+
 def build_extraction_packet(
     job_id: str | uuid.UUID,
 ) -> dict[str, Any]:
@@ -731,41 +938,59 @@ def build_extraction_packet(
         )
         chunks: list[dict[str, Any]] = []
         chars = 0
+
         for context_type, context_id in context_ids:
-            meta = _source_metadata(session, context_type, context_id)
-            rows = list(
-                session.scalars(
-                    select(DocumentChunk)
-                    .where(
-                        DocumentChunk.source_type == context_type,
-                        DocumentChunk.source_id == context_id,
-                        DocumentChunk.embedding_status == "indexed",
-                    )
-                    .order_by(DocumentChunk.chunk_index)
-                )
+            meta = _source_metadata(
+                session,
+                context_type,
+                context_id,
             )
-            for row in rows:
-                if len(chunks) >= settings.knowledge_extraction_max_chunks:
-                    break
-                remaining = settings.knowledge_extraction_max_context_chars - chars
-                if remaining <= 0:
-                    break
-                text = row.text[:remaining]
-                chunks.append(
-                    {
-                        "chunk_id": str(row.id),
-                        "source_ref": meta["source_ref"],
-                        "source_type": context_type,
-                        "source_id": str(context_id),
-                        "source_date": meta.get("source_date"),
-                        "chunk_index": row.chunk_index,
-                        "text": text,
-                    }
-                )
-                chars += len(text)
+
+            chars = _append_source_chunks(
+                _iter_indexed_source_chunks(
+                    session,
+                    source_type=(
+                        context_type
+                    ),
+                    source_id=(
+                        context_id
+                    ),
+                ),
+                chunks=chunks,
+                current_chars=chars,
+                max_chunks=(
+                    settings
+                    .knowledge_extraction_max_chunks
+                ),
+                max_context_chars=(
+                    settings
+                    .knowledge_extraction_max_context_chars
+                ),
+                source_ref=str(
+                    meta[
+                        "source_ref"
+                    ]
+                ),
+                source_type=(
+                    context_type
+                ),
+                source_id=(
+                    context_id
+                ),
+                source_date=(
+                    meta.get(
+                        "source_date"
+                    )
+                ),
+            )
+
             if (
-                len(chunks) >= settings.knowledge_extraction_max_chunks
-                or chars >= settings.knowledge_extraction_max_context_chars
+                len(
+                    chunks
+                )
+                >= settings.knowledge_extraction_max_chunks
+                or chars
+                >= settings.knowledge_extraction_max_context_chars
             ):
                 break
 
