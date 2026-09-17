@@ -280,33 +280,57 @@ def is_identifier_query(value: str) -> bool:
         if compound.raw_prefix.isupper():
             return True
 
-    normalized = normalize_query(value)
+    normalized = normalize_query(
+        value
+    )
+
     tokens = informative_query_tokens(
         value
     )
+
     raw_tokens = _raw_clean_tokens(
         value
     )
 
-    explicit_marker = any(
-        marker in value
-        for marker in (
-            "№",
-            "#",
-            "\\",
-            "@",
+    # A compact e-mail-like query is still an identifier.
+    # An e-mail address embedded inside normal prose is not.
+    compact_email = (
+        "@"
+        in value
+        and not any(
+            char.isspace()
+            for char in value
         )
     )
 
-    has_digit = any(
-        char.isdigit()
-        for char in value
+    if compact_email:
+        return True
+
+    # Preserve compact explicit marker forms such as:
+    #   Б24 №189422
+    #   #195930
+    #
+    # Do not let the same markers classify a full e-mail/body as
+    # one giant identifier query merely because the body also
+    # contains a date or another number.
+    compact_marker_query = (
+        len(normalized) <= 96
+        and len(tokens) <= 4
+        and any(
+            marker in value
+            for marker in (
+                "№",
+                "#",
+                "\\",
+            )
+        )
+        and any(
+            char.isdigit()
+            for char in value
+        )
     )
 
-    if (
-        explicit_marker
-        and has_digit
-    ):
+    if compact_marker_query:
         return True
 
     if len(tokens) != 1:
@@ -338,11 +362,7 @@ def is_identifier_query(value: str) -> bool:
     ):
         return True
 
-    return (
-        "@"
-        in value
-        and " " not in normalized
-    )
+    return False
 
 
 def clamp01(value: float | int | None) -> float:

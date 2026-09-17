@@ -33,6 +33,7 @@ from packages.search.ranking import (
 FTS_INDEX_NAME = "ix_document_chunks_text_fts_simple"
 VALID_MODES = {"hybrid", "semantic", "lexical"}
 VALID_SOURCE_TYPES = {"all", "email", "attachment", "document"}
+LEXICAL_STATEMENT_TIMEOUT_MS = 10_000
 
 
 class HybridSearchError(ValueError):
@@ -659,6 +660,29 @@ def _fts_index_available() -> bool:
         )
 
 
+def _apply_lexical_statement_timeout(
+    session,
+) -> None:
+    """
+    Bound PostgreSQL lexical retrieval to the current transaction.
+
+    _lexical_candidates() is fail-soft, so a pathological FTS query
+    becomes a warning instead of blocking WorkMind indefinitely.
+    """
+    session.execute(
+        text(
+            "SELECT set_config("
+            "'statement_timeout', "
+            ":timeout, "
+            "true)"
+        ),
+        {
+            "timeout": (
+                f"{LEXICAL_STATEMENT_TIMEOUT_MS}ms"
+            )
+        },
+    )
+
 def _lexical_candidates(
     *,
     query: str,
@@ -860,6 +884,9 @@ def _lexical_candidates(
 
         try:
             with SessionLocal() as session:
+                _apply_lexical_statement_timeout(
+                    session
+                )
                 rows = (
                     session.execute(
                         statement,
@@ -1107,6 +1134,9 @@ def _lexical_candidates(
 
     try:
         with SessionLocal() as session:
+            _apply_lexical_statement_timeout(
+                session
+            )
             rows = (
                 session.execute(
                     statement,
