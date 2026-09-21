@@ -613,6 +613,14 @@ def _semantic_candidates(
                 else None
             ),
             with_payload=True,
+            search_params=(
+                qmodels.SearchParams(
+                    hnsw_ef=(
+                        settings.hybrid_search_hnsw_ef
+                    ),
+                    exact=False,
+                )
+            ),
         )
 
         return [

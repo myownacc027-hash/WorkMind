@@ -35,6 +35,13 @@ class Settings(BaseSettings):
         ge=50,
         le=2000,
     )
+    hybrid_search_hnsw_ef: int = Field(
+        default=2048,
+        ge=16,
+        le=8192,
+        validation_alias="HYBRID_SEARCH_HNSW_EF",
+    )
+
     hybrid_search_snippets_per_source: int = Field(
         default=3,
         ge=1,
