@@ -20,6 +20,7 @@ from packages.database.session import SessionLocal
 from packages.processing.embeddings import embed_texts
 from packages.search.qdrant import get_qdrant_client
 from packages.search.ranking import (
+    anchor_tokens,
     compound_identifier_match_span,
     informative_query_tokens,
     is_identifier_query,
@@ -28,11 +29,61 @@ from packages.search.ranking import (
     primary_anchor_token,
     query_tokens,
     rank_signals,
+    weighted_query_coverage,
 )
 
 FTS_INDEX_NAME = "ix_document_chunks_text_fts_simple"
 VALID_MODES = {"hybrid", "semantic", "lexical"}
 VALID_SOURCE_TYPES = {"all", "email", "attachment", "document"}
+
+
+LEXICAL_RESCUE_MAX_VARIANTS = 3
+LEXICAL_RESCUE_ACCEPT_MAX_ROWS = 25
+LEXICAL_RESCUE_PROBE_LIMIT = (
+    LEXICAL_RESCUE_ACCEPT_MAX_ROWS + 1
+)
+LEXICAL_RESCUE_MIN_COVERAGE = 0.34
+
+LEXICAL_RESCUE_GENERIC_QUERY_TOKENS = frozenset(
+    {
+        "какой",
+        "какая",
+        "какие",
+        "какое",
+        "каков",
+        "какова",
+        "каковы",
+        "почему",
+        "где",
+        "когда",
+        "кто",
+        "что",
+        "сколько",
+        "действует",
+        "действуют",
+        "может",
+        "могут",
+        "быть",
+        "находится",
+        "находятся",
+        "расположен",
+        "расположены",
+        "указан",
+        "указана",
+        "указаны",
+        "указано",
+        "перечислен",
+        "перечислена",
+        "перечислены",
+        "перечислено",
+        "письмо",
+        "письме",
+        "новый",
+        "новая",
+        "новые",
+        "новое",
+    }
+)
 LEXICAL_STATEMENT_TIMEOUT_MS = 10_000
 
 
@@ -1397,6 +1448,353 @@ def _source_passes_filters(
     return True
 
 
+
+def _lexical_rescue_variants(
+    query: str,
+) -> tuple[str, ...]:
+    tokens = list(
+        informative_query_tokens(
+            query
+        )
+    )
+
+    anchors = list(
+        anchor_tokens(
+            query
+        )
+    )
+
+    anchor_set = set(
+        anchors
+    )
+
+    content = [
+        token
+        for token in tokens
+        if (
+            token
+            not in (
+                LEXICAL_RESCUE_GENERIC_QUERY_TOKENS
+            )
+            and len(token) >= 3
+        )
+    ]
+
+    variants: list[str] = []
+
+
+    def add(
+        parts: list[str],
+    ) -> None:
+        clean: list[str] = []
+        seen: set[str] = set()
+
+        for part in parts:
+            folded = (
+                part.casefold()
+                .strip()
+            )
+
+            if (
+                not folded
+                or folded in seen
+            ):
+                continue
+
+            seen.add(
+                folded
+            )
+
+            clean.append(
+                folded
+            )
+
+        if len(clean) < 2:
+            return
+
+        value = " ".join(
+            clean
+        )
+
+        if (
+            value.casefold()
+            == query.casefold().strip()
+        ):
+            return
+
+        if value in variants:
+            return
+
+        variants.append(
+            value
+        )
+
+
+    if len(anchors) >= 2:
+        add(
+            anchors[:4]
+        )
+
+    elif len(anchors) == 1:
+        non_anchor = [
+            token
+            for token in content
+            if token not in anchor_set
+        ]
+
+        if non_anchor:
+            add(
+                [
+                    anchors[0],
+                    non_anchor[0],
+                ]
+            )
+
+
+    add(
+        content[:4]
+    )
+
+
+    longest = sorted(
+        content,
+        key=lambda token: (
+            len(token),
+            -tokens.index(token),
+        ),
+        reverse=True,
+    )
+
+    add(
+        longest[:3]
+    )
+
+
+    return tuple(
+        variants[
+            :LEXICAL_RESCUE_MAX_VARIANTS
+        ]
+    )
+
+
+def _lexical_rescue_candidates(
+    *,
+    query: str,
+    source_type: str,
+    candidate_limit: int,
+    eligible_source_ids: (
+        tuple[uuid.UUID, ...]
+        | None
+    ) = None,
+) -> tuple[
+    list[dict[str, Any]],
+    list[str],
+]:
+    if is_identifier_query(
+        query
+    ):
+        return [], []
+
+
+    variants = (
+        _lexical_rescue_variants(
+            query
+        )
+    )
+
+    accepted: dict[
+        str,
+        dict[str, Any],
+    ] = {}
+
+    warnings: list[str] = []
+
+
+    for variant in variants:
+        # A generated query must never enter the
+        # relaxed identifier branch.
+        if is_identifier_query(
+            variant
+        ):
+            continue
+
+
+        rows, channel_warnings = (
+            _lexical_candidates(
+                query=variant,
+                source_type=source_type,
+                candidate_limit=(
+                    LEXICAL_RESCUE_PROBE_LIMIT
+                ),
+                eligible_source_ids=(
+                    eligible_source_ids
+                ),
+            )
+        )
+
+        warnings.extend(
+            channel_warnings
+        )
+
+
+        # We intentionally ask for 26 rows.
+        # If 26 arrive, this reduced query is
+        # broader than the accepted maximum of 25.
+        if (
+            len(rows)
+            > LEXICAL_RESCUE_ACCEPT_MAX_ROWS
+        ):
+            continue
+
+
+        for variant_rank, row in enumerate(
+            rows,
+            start=1,
+        ):
+            coverage = float(
+                weighted_query_coverage(
+                    query,
+                    str(
+                        row.get("text")
+                        or ""
+                    ),
+                )
+            )
+
+
+            if (
+                coverage
+                < LEXICAL_RESCUE_MIN_COVERAGE
+            ):
+                continue
+
+
+            chunk_id = str(
+                row.get("chunk_id")
+                or ""
+            )
+
+            if not chunk_id:
+                continue
+
+
+            candidate = {
+                "row": dict(row),
+                "coverage": coverage,
+                "variant_rank": (
+                    variant_rank
+                ),
+                "variant_cardinality": (
+                    len(rows)
+                ),
+            }
+
+
+            current = accepted.get(
+                chunk_id
+            )
+
+
+            if current is None:
+                accepted[
+                    chunk_id
+                ] = candidate
+
+                continue
+
+
+            current_key = (
+                float(
+                    current[
+                        "coverage"
+                    ]
+                ),
+                -int(
+                    current[
+                        "variant_cardinality"
+                    ]
+                ),
+                -int(
+                    current[
+                        "variant_rank"
+                    ]
+                ),
+            )
+
+            candidate_key = (
+                coverage,
+                -len(rows),
+                -variant_rank,
+            )
+
+
+            if (
+                candidate_key
+                > current_key
+            ):
+                accepted[
+                    chunk_id
+                ] = candidate
+
+
+    ordered = sorted(
+        accepted.values(),
+        key=lambda item: (
+            float(
+                item[
+                    "coverage"
+                ]
+            ),
+            -int(
+                item[
+                    "variant_cardinality"
+                ]
+            ),
+            -int(
+                item[
+                    "variant_rank"
+                ]
+            ),
+            float(
+                item[
+                    "row"
+                ].get(
+                    "score"
+                )
+                or 0.0
+            ),
+        ),
+        reverse=True,
+    )
+
+
+    output: list[
+        dict[str, Any]
+    ] = []
+
+
+    for rank, item in enumerate(
+        ordered[
+            :candidate_limit
+        ],
+        start=1,
+    ):
+        row = dict(
+            item["row"]
+        )
+
+        row["rank"] = rank
+
+        output.append(
+            row
+        )
+
+
+    return (
+        output,
+        warnings,
+    )
+
 def _excerpt(
     value: str,
     *,
@@ -1830,6 +2228,27 @@ def search_hybrid(
         warnings.extend(
             channel_warnings
         )
+
+        if (
+            not lexical_rows
+            and not channel_warnings
+            and not identifier_query
+        ):
+            (
+                lexical_rows,
+                channel_warnings,
+            ) = _lexical_rescue_candidates(
+                query=clean_query,
+                source_type=clean_source_type,
+                candidate_limit=candidate_limit,
+                eligible_source_ids=(
+                    eligible_source_ids
+                ),
+            )
+
+            warnings.extend(
+                channel_warnings
+            )
 
     sources: dict[
         tuple[str, uuid.UUID],
