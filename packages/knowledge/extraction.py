@@ -452,6 +452,10 @@ def claim_extraction_jobs(
 ) -> list[KnowledgeExtractionJob]:
     settings = get_settings()
     safe_limit = max(1, min(int(limit), 20))
+    scan_limit = max(
+        safe_limit,
+        min(safe_limit + 32, 100),
+    )
     lease_for = int(
         lease_minutes
         if lease_minutes is not None
@@ -476,17 +480,52 @@ def claim_extraction_jobs(
                     KnowledgeExtractionJob.created_at,
                 )
                 .with_for_update(skip_locked=True)
-                .limit(safe_limit)
+                .limit(scan_limit)
             )
         )
+        leased_jobs: list[
+            KnowledgeExtractionJob
+        ] = []
+
         for job in jobs:
+            if (
+                len(leased_jobs)
+                >= safe_limit
+            ):
+                break
+
+            try:
+                current_hash = _source_hash(
+                    session,
+                    job.source_type,
+                    job.source_id,
+                )
+            except KnowledgeExtractionError:
+                current_hash = None
+
+            if (
+                current_hash
+                != job.source_content_hash
+            ):
+                job.status = "superseded"
+                job.lease_token = None
+                job.leased_at = None
+                job.lease_expires_at = None
+                job.completed_at = now
+                job.last_error = (
+                    "Source content changed or "
+                    "disappeared before extraction "
+                    "lease; job superseded."
+                )
+                continue
             job.status = "leased"
             job.attempts += 1
+            leased_jobs.append(job)
             job.lease_token = uuid.uuid4()
             job.leased_at = now
             job.lease_expires_at = now + timedelta(minutes=lease_for)
         session.commit()
-        return jobs
+        return leased_jobs
 
 
 def _message_meta(message: EmailMessage) -> dict[str, Any]:
