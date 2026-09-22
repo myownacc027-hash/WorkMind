@@ -362,3 +362,188 @@ def test_manifest_entries_are_sorted_by_stable_path(
     ]
 
     assert paths == sorted(paths)
+
+
+def test_manifest_includes_navigation_plan_without_writes(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    task_id = (
+        "11111111-1111-1111-1111-111111111111"
+    )
+
+    incident_id = (
+        "22222222-2222-2222-2222-222222222222"
+    )
+
+    selection = {
+        "total_count": 2,
+        "selected_count": 2,
+        "entities": [
+            {
+                "entity_id": task_id,
+                "entity_type": "task",
+                "canonical_name": "Task A",
+                "status": "active",
+            },
+            {
+                "entity_id": incident_id,
+                "entity_type": "incident",
+                "canonical_name": "Incident A",
+                "status": "active",
+            },
+        ],
+    }
+
+    snapshots = {
+        task_id: {
+            "entity": {
+                "entity_id": task_id,
+                "entity_type": "task",
+                "canonical_name": "Task A",
+                "status": "active",
+            },
+            "claims": [],
+            "outgoing_relations": [],
+            "incoming_relations": [],
+            "events": [],
+            "dated_claims": [],
+        },
+        incident_id: {
+            "entity": {
+                "entity_id": incident_id,
+                "entity_type": "incident",
+                "canonical_name": "Incident A",
+                "status": "active",
+            },
+            "claims": [],
+            "outgoing_relations": [],
+            "incoming_relations": [],
+            "events": [],
+            "dated_claims": [],
+        },
+    }
+
+    zero_counts = {
+        "ordinary_claim_count": 0,
+        "outgoing_relation_count": 0,
+        "incoming_relation_count": 0,
+        "event_count": 0,
+        "dated_claim_count": 0,
+    }
+
+    monkeypatch.setattr(
+        export,
+        "_list_entities",
+        lambda **_kwargs: selection,
+    )
+
+    monkeypatch.setattr(
+        export,
+        "_load_entity_snapshot",
+        lambda entity_id, **_kwargs: snapshots[
+            entity_id
+        ],
+    )
+
+    monkeypatch.setattr(
+        export,
+        "_projection_counts",
+        lambda _entity_id: dict(
+            zero_counts
+        ),
+    )
+
+    monkeypatch.setattr(
+        export,
+        "normalize_service_snapshot",
+        lambda raw: raw,
+    )
+
+    first = export.build_projection_manifest(
+        limit=100,
+        vault_root=tmp_path,
+    )
+
+    second = export.build_projection_manifest(
+        limit=100,
+        vault_root=tmp_path,
+    )
+
+    assert first == second
+
+    assert first[
+        "selected_entity_count"
+    ] == 2
+
+    assert first[
+        "selection_complete"
+    ] is True
+
+    assert first[
+        "navigation_entry_count"
+    ] == 4
+
+    assert first[
+        "projected_file_count"
+    ] == 6
+
+    navigation = first[
+        "navigation_entries"
+    ]
+
+    assert [
+        item["relative_path"]
+        for item in navigation
+    ] == [
+        "Home.md",
+        "Index/Incidents.md",
+        "Index/Organizations.md",
+        "Index/Tasks.md",
+    ]
+
+    assert [
+        item["navigation_role"]
+        for item in navigation
+    ] == [
+        "home",
+        "index",
+        "index",
+        "index",
+    ]
+
+    assert all(
+        len(
+            item["content_sha256"]
+        )
+        == 64
+        for item in navigation
+    )
+
+    assert first[
+        "navigation_content_bytes"
+    ] == sum(
+        item["content_bytes"]
+        for item in navigation
+    )
+
+    assert first[
+        "projected_content_bytes"
+    ] == (
+        first["total_content_bytes"]
+        + first["navigation_content_bytes"]
+    )
+
+    assert len(
+        first[
+            "navigation_fingerprint"
+        ]
+    ) == 64
+
+    assert first[
+        "vault_writes_performed"
+    ] is False
+
+    assert list(
+        tmp_path.iterdir()
+    ) == []

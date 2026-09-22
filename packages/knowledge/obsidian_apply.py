@@ -16,6 +16,9 @@ from packages.knowledge.obsidian_export import (
     build_projection_manifest,
     normalize_service_snapshot,
 )
+from packages.knowledge.obsidian_navigation import (
+    render_navigation_pages,
+)
 from packages.knowledge.obsidian_projection import (
     entity_relative_path,
     render_entity_markdown,
@@ -96,22 +99,41 @@ def _is_managed_file(path: Path) -> bool:
     return _managed_frontmatter(text)
 
 
+
 def _safe_target_path(
     root: Path,
     relative_path: str,
 ) -> Path:
-    relative = Path(relative_path)
+    relative = Path(
+        relative_path
+    )
 
-    if relative.is_absolute():
-        raise ObsidianExportError(
-            "Projection path must be relative."
-        )
+    parts = relative.parts
+
+    is_entity = (
+        len(parts) >= 3
+        and parts[0] == "Entities"
+    )
+
+    is_home = (
+        parts == ("Home.md",)
+    )
+
+    is_index = (
+        len(parts) == 2
+        and parts[0] == "Index"
+    )
 
     if (
-        not relative.parts
-        or relative.parts[0] != "Entities"
-        or ".." in relative.parts
+        relative.is_absolute()
+        or not parts
+        or ".." in parts
         or relative.suffix.casefold() != ".md"
+        or not (
+            is_entity
+            or is_home
+            or is_index
+        )
     ):
         raise ObsidianExportError(
             "Unsafe projection path: "
@@ -123,7 +145,7 @@ def _safe_target_path(
     )
 
     target = root.joinpath(
-        *relative.parts
+        *parts
     )
 
     target_resolved = target.resolve(
@@ -143,6 +165,7 @@ def _safe_target_path(
     return target
 
 
+
 def _render_manifest_payloads(
     manifest: Mapping[str, Any],
     *,
@@ -151,24 +174,41 @@ def _render_manifest_payloads(
     """
     Re-read and re-render each entity immediately before persistence.
 
-    The manifest hash must still match. This prevents applying stale
-    output when structured knowledge changed after manifest creation.
+    Entity and navigation hashes must still match the manifest. This
+    prevents applying stale output when structured knowledge or renderer
+    behavior changed after manifest creation.
+
+    Manifests without ``navigation_entries`` remain supported as the
+    legacy entity-only contract.
     """
 
-    payloads: dict[str, bytes] = {}
+    payloads: dict[
+        str,
+        bytes,
+    ] = {}
+
+    navigation_source: list[
+        dict[str, Any]
+    ] = []
 
     entries = manifest.get(
         "entries",
         []
     )
 
-    if not isinstance(entries, list):
+    if not isinstance(
+        entries,
+        list,
+    ):
         raise ObsidianExportError(
             "Invalid projection manifest."
         )
 
     for entry in entries:
-        if not isinstance(entry, Mapping):
+        if not isinstance(
+            entry,
+            Mapping,
+        ):
             raise ObsidianExportError(
                 "Invalid manifest entry."
             )
@@ -244,9 +284,143 @@ def _render_manifest_payloads(
                 f"{relative_path}"
             )
 
-        payloads[relative_path] = payload
+        payloads[
+            relative_path
+        ] = payload
+
+        navigation_source.append(
+            {
+                "entity_id": entity_id,
+                "entity_type": (
+                    entry.get(
+                        "entity_type"
+                    )
+                ),
+                "canonical_name": (
+                    entry.get(
+                        "canonical_name"
+                    )
+                ),
+                "status": entry.get(
+                    "status"
+                ),
+                "relative_path": (
+                    relative_path
+                ),
+            }
+        )
+
+    if (
+        "navigation_entries"
+        not in manifest
+    ):
+        return payloads
+
+    navigation_entries = manifest.get(
+        "navigation_entries"
+    )
+
+    if not isinstance(
+        navigation_entries,
+        list,
+    ):
+        raise ObsidianExportError(
+            "Invalid navigation manifest."
+        )
+
+    navigation_pages = (
+        render_navigation_pages(
+            navigation_source
+        )
+    )
+
+    expected_navigation: dict[
+        str,
+        str,
+    ] = {}
+
+    for entry in navigation_entries:
+        if not isinstance(
+            entry,
+            Mapping,
+        ):
+            raise ObsidianExportError(
+                "Invalid navigation manifest entry."
+            )
+
+        relative_path = str(
+            entry.get(
+                "relative_path"
+            )
+            or ""
+        )
+
+        expected_sha256 = str(
+            entry.get(
+                "content_sha256"
+            )
+            or ""
+        )
+
+        if (
+            relative_path
+            in expected_navigation
+        ):
+            raise ObsidianExportError(
+                "Duplicate navigation target: "
+                f"{relative_path}"
+            )
+
+        expected_navigation[
+            relative_path
+        ] = expected_sha256
+
+    if set(
+        expected_navigation
+    ) != set(
+        navigation_pages
+    ):
+        raise ObsidianExportError(
+            "Navigation projection changed between "
+            "manifest and apply."
+        )
+
+    for (
+        relative_path,
+        markdown,
+    ) in navigation_pages.items():
+        payload = markdown.encode(
+            "utf-8"
+        )
+
+        actual_sha256 = hashlib.sha256(
+            payload
+        ).hexdigest()
+
+        if (
+            actual_sha256
+            != expected_navigation[
+                relative_path
+            ]
+        ):
+            raise ObsidianExportError(
+                "Navigation content changed between "
+                "manifest and apply for "
+                f"{relative_path}."
+            )
+
+        if relative_path in payloads:
+            raise ObsidianExportError(
+                "Duplicate projection target: "
+                f"{relative_path}"
+            )
+
+        payloads[
+            relative_path
+        ] = payload
 
     return payloads
+
 
 
 def _preflight_vault(
@@ -254,9 +428,18 @@ def _preflight_vault(
     payloads: Mapping[str, bytes],
     *,
     prune: bool,
+    manage_navigation: bool = False,
 ) -> dict[str, Any]:
     """
-    Validate all overwrite/delete decisions before modifying the vault.
+    Validate every overwrite/delete decision before modifying the vault.
+
+    WorkMind owns only:
+    - Entities/**/*.md
+    - Home.md when navigation is present
+    - Index/*.md when navigation is present
+
+    Other vault content, including .obsidian, is outside the managed
+    projection surface.
     """
 
     if root.exists():
@@ -270,7 +453,10 @@ def _preflight_vault(
                 "Vault root exists but is not a directory."
             )
 
-    entities_root = root / "Entities"
+    entities_root = (
+        root
+        / "Entities"
+    )
 
     if entities_root.exists():
         if entities_root.is_symlink():
@@ -283,10 +469,38 @@ def _preflight_vault(
                 "Entities path exists but is not a directory."
             )
 
-    targets: dict[Path, bytes] = {}
-    unchanged: set[Path] = set()
+    index_root = (
+        root
+        / "Index"
+    )
 
-    for relative_path, payload in payloads.items():
+    if (
+        manage_navigation
+        and index_root.exists()
+    ):
+        if index_root.is_symlink():
+            raise ObsidianExportError(
+                "Index directory must not be a symlink."
+            )
+
+        if not index_root.is_dir():
+            raise ObsidianExportError(
+                "Index path exists but is not a directory."
+            )
+
+    targets: dict[
+        Path,
+        bytes,
+    ] = {}
+
+    unchanged: set[
+        Path
+    ] = set()
+
+    for (
+        relative_path,
+        payload,
+    ) in payloads.items():
         target = _safe_target_path(
             root,
             relative_path,
@@ -298,7 +512,9 @@ def _preflight_vault(
                 f"{relative_path}"
             )
 
-        targets[target] = payload
+        targets[
+            target
+        ] = payload
 
         if not (
             target.exists()
@@ -319,7 +535,9 @@ def _preflight_vault(
                 f"{target}"
             )
 
-        if not _is_managed_file(target):
+        if not _is_managed_file(
+            target
+        ):
             raise ObsidianExportError(
                 "Refusing to overwrite "
                 "unmanaged Markdown file: "
@@ -334,33 +552,77 @@ def _preflight_vault(
             payload
         ).hexdigest()
 
-        if existing_hash == desired_hash:
-            unchanged.add(target)
+        if (
+            existing_hash
+            == desired_hash
+        ):
+            unchanged.add(
+                target
+            )
 
-    stale_managed: list[Path] = []
+    stale_managed: list[
+        Path
+    ] = []
+
     preserved_unmanaged = 0
 
-    if (
-        prune
-        and entities_root.exists()
-    ):
-        for path in entities_root.rglob(
-            "*.md"
+    candidates: list[
+        Path
+    ] = []
+
+    if prune:
+        if entities_root.exists():
+            candidates.extend(
+                entities_root.rglob(
+                    "*.md"
+                )
+            )
+
+        if manage_navigation:
+            home = (
+                root
+                / "Home.md"
+            )
+
+            if (
+                home.exists()
+                or home.is_symlink()
+            ):
+                candidates.append(
+                    home
+                )
+
+            if index_root.exists():
+                candidates.extend(
+                    index_root.glob(
+                        "*.md"
+                    )
+                )
+
+    unique_candidates = sorted(
+        set(candidates),
+        key=lambda item: str(item),
+    )
+
+    for path in unique_candidates:
+        if path.is_symlink():
+            preserved_unmanaged += 1
+            continue
+
+        if not path.is_file():
+            continue
+
+        if path in targets:
+            continue
+
+        if _is_managed_file(
+            path
         ):
-            if path.is_symlink():
-                preserved_unmanaged += 1
-                continue
-
-            if not path.is_file():
-                continue
-
-            if path in targets:
-                continue
-
-            if _is_managed_file(path):
-                stale_managed.append(path)
-            else:
-                preserved_unmanaged += 1
+            stale_managed.append(
+                path
+            )
+        else:
+            preserved_unmanaged += 1
 
     stale_managed.sort(
         key=lambda item: str(item)
@@ -370,8 +632,11 @@ def _preflight_vault(
         "targets": targets,
         "unchanged": unchanged,
         "stale_managed": stale_managed,
-        "preserved_unmanaged": preserved_unmanaged,
+        "preserved_unmanaged": (
+            preserved_unmanaged
+        ),
     }
+
 
 
 def apply_projection(
@@ -386,11 +651,27 @@ def apply_projection(
     Safely persist a complete WorkMind Markdown projection.
 
     PostgreSQL remains the source of truth.
+
+    Applying a status-filtered subset is intentionally rejected. A
+    writable Obsidian projection must represent the complete entity set;
+    filtered views remain available through dry-run only.
     """
+
+    clean_status = (
+        status.strip()
+        if status
+        else None
+    )
+
+    if clean_status:
+        raise ObsidianExportError(
+            "Refusing to apply a filtered projection. "
+            "Use dry-run for status-filtered views."
+        )
 
     manifest = build_projection_manifest(
         limit=limit,
-        status=status,
+        status=None,
         include_excerpt=include_excerpt,
         vault_root=vault_root,
     )
@@ -404,7 +685,11 @@ def apply_projection(
         )
 
     root = Path(
-        str(manifest["vault_root"])
+        str(
+            manifest[
+                "vault_root"
+            ]
+        )
     )
 
     payloads = _render_manifest_payloads(
@@ -412,23 +697,36 @@ def apply_projection(
         include_excerpt=include_excerpt,
     )
 
+    manage_navigation = (
+        "navigation_entries"
+        in manifest
+    )
+
     preflight = _preflight_vault(
         root,
         payloads,
         prune=prune,
+        manage_navigation=manage_navigation,
     )
 
-    targets: dict[Path, bytes] = (
-        preflight["targets"]
-    )
+    targets: dict[
+        Path,
+        bytes,
+    ] = preflight[
+        "targets"
+    ]
 
-    unchanged: set[Path] = (
-        preflight["unchanged"]
-    )
+    unchanged: set[
+        Path
+    ] = preflight[
+        "unchanged"
+    ]
 
-    stale_managed: list[Path] = (
-        preflight["stale_managed"]
-    )
+    stale_managed: list[
+        Path
+    ] = preflight[
+        "stale_managed"
+    ]
 
     # Nothing in the vault has changed before this point.
     root.parent.mkdir(
@@ -442,7 +740,9 @@ def apply_projection(
                 f".{root.name}"
                 ".workmind-stage-"
             ),
-            dir=str(root.parent),
+            dir=str(
+                root.parent
+            ),
         )
     )
 
@@ -450,9 +750,15 @@ def apply_projection(
     pruned = 0
 
     try:
-        staged: dict[Path, Path] = {}
+        staged: dict[
+            Path,
+            Path,
+        ] = {}
 
-        for target, payload in targets.items():
+        for (
+            target,
+            payload,
+        ) in targets.items():
             if target in unchanged:
                 continue
 
@@ -464,8 +770,10 @@ def apply_projection(
                 )
             )
 
-            staged_path = staging_root.joinpath(
-                *relative.parts
+            staged_path = (
+                staging_root.joinpath(
+                    *relative.parts
+                )
             )
 
             staged_path.parent.mkdir(
@@ -477,7 +785,9 @@ def apply_projection(
                 payload
             )
 
-            staged[target] = staged_path
+            staged[
+                target
+            ] = staged_path
 
         # Every new payload exists before the first target is changed.
         root.mkdir(
@@ -501,11 +811,13 @@ def apply_projection(
 
             written += 1
 
-        # Remove obsolete files only when ownership is still verified.
+        # Remove obsolete files only while ownership is still verified.
         for path in stale_managed:
             if (
                 path.exists()
-                and _is_managed_file(path)
+                and _is_managed_file(
+                    path
+                )
             ):
                 path.unlink()
                 pruned += 1
@@ -520,17 +832,27 @@ def apply_projection(
         "ok": True,
         "source_of_truth": "postgresql",
         "projection_version": (
-            manifest["projection_version"]
+            manifest[
+                "projection_version"
+            ]
         ),
         "manifest_version": (
-            manifest["manifest_version"]
+            manifest[
+                "manifest_version"
+            ]
         ),
-        "vault_root": str(root),
+        "vault_root": str(
+            root
+        ),
         "manifest_fingerprint": (
-            manifest["manifest_fingerprint"]
+            manifest[
+                "manifest_fingerprint"
+            ]
         ),
         "selected_entity_count": (
-            manifest["selected_entity_count"]
+            manifest[
+                "selected_entity_count"
+            ]
         ),
         "selection_complete": True,
         "written_count": written,

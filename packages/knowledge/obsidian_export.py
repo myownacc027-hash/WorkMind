@@ -15,6 +15,9 @@ from packages.database.models import (
     KnowledgeEvent,
 )
 from packages.knowledge import service
+from packages.knowledge.obsidian_navigation import (
+    render_navigation_pages,
+)
 from packages.knowledge.obsidian_projection import (
     PROJECTION_VERSION,
     entity_relative_path,
@@ -516,6 +519,83 @@ def build_projection_manifest(
         )
     )
 
+    navigation_pages = (
+        render_navigation_pages(
+            entries
+        )
+    )
+
+    navigation_entries: list[
+        dict[str, Any]
+    ] = []
+
+    for (
+        relative_path,
+        markdown,
+    ) in navigation_pages.items():
+        relative = Path(
+            relative_path
+        )
+
+        payload = markdown.encode(
+            "utf-8"
+        )
+
+        target_path = root.joinpath(
+            *relative.parts
+        )
+
+        navigation_entries.append(
+            {
+                "navigation_role": (
+                    "home"
+                    if relative_path == "Home.md"
+                    else "index"
+                ),
+                "relative_path": (
+                    relative.as_posix()
+                ),
+                "target_path": str(
+                    target_path
+                ),
+                "content_sha256": (
+                    hashlib.sha256(
+                        payload
+                    ).hexdigest()
+                ),
+                "content_chars": len(
+                    markdown
+                ),
+                "content_bytes": len(
+                    payload
+                ),
+            }
+        )
+
+    navigation_entries.sort(
+        key=lambda item: (
+            item["relative_path"],
+            item["navigation_role"],
+        )
+    )
+
+    navigation_bytes = sum(
+        int(item["content_bytes"])
+        for item in navigation_entries
+    )
+
+    navigation_fingerprint = (
+        _sha256_text(
+            "\n".join(
+                (
+                    f"{item['relative_path']} "
+                    f"{item['content_sha256']}"
+                )
+                for item in navigation_entries
+            )
+        )
+    )
+
     total_bytes = sum(
         int(item["content_bytes"])
         for item in entries
@@ -559,8 +639,28 @@ def build_projection_manifest(
         "total_content_bytes": (
             total_bytes
         ),
+        "navigation_entry_count": len(
+            navigation_entries
+        ),
+        "navigation_content_bytes": (
+            navigation_bytes
+        ),
+        "projected_file_count": (
+            len(entries)
+            + len(navigation_entries)
+        ),
+        "projected_content_bytes": (
+            total_bytes
+            + navigation_bytes
+        ),
+        "navigation_fingerprint": (
+            navigation_fingerprint
+        ),
         "manifest_fingerprint": (
             manifest_fingerprint
         ),
         "entries": entries,
+        "navigation_entries": (
+            navigation_entries
+        ),
     }

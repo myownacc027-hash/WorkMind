@@ -597,3 +597,426 @@ def test_unchanged_projection_is_not_rewritten(
     assert second[
         "vault_writes_performed"
     ] is False
+
+
+def _manifest_with_navigation(
+    raw: dict,
+    vault_root: Path,
+) -> dict:
+    manifest = _manifest(
+        raw,
+        vault_root,
+    )
+
+    pages = (
+        apply.render_navigation_pages(
+            manifest["entries"]
+        )
+    )
+
+    navigation_entries = []
+
+    for (
+        relative_path,
+        markdown,
+    ) in pages.items():
+        payload = markdown.encode(
+            "utf-8"
+        )
+
+        navigation_entries.append(
+            {
+                "navigation_role": (
+                    "home"
+                    if relative_path
+                    == "Home.md"
+                    else "index"
+                ),
+                "relative_path": (
+                    relative_path
+                ),
+                "target_path": str(
+                    vault_root.joinpath(
+                        *Path(
+                            relative_path
+                        ).parts
+                    )
+                ),
+                "content_sha256": (
+                    hashlib.sha256(
+                        payload
+                    ).hexdigest()
+                ),
+                "content_chars": len(
+                    markdown
+                ),
+                "content_bytes": len(
+                    payload
+                ),
+            }
+        )
+
+    navigation_entries.sort(
+        key=lambda item: (
+            item["relative_path"],
+            item["navigation_role"],
+        )
+    )
+
+    navigation_bytes = sum(
+        item["content_bytes"]
+        for item in navigation_entries
+    )
+
+    navigation_text = "\n".join(
+        (
+            f"{item['relative_path']} "
+            f"{item['content_sha256']}"
+        )
+        for item in navigation_entries
+    )
+
+    manifest[
+        "navigation_entries"
+    ] = navigation_entries
+
+    manifest[
+        "navigation_entry_count"
+    ] = len(
+        navigation_entries
+    )
+
+    manifest[
+        "navigation_content_bytes"
+    ] = navigation_bytes
+
+    manifest[
+        "projected_file_count"
+    ] = (
+        len(
+            manifest["entries"]
+        )
+        + len(
+            navigation_entries
+        )
+    )
+
+    manifest[
+        "projected_content_bytes"
+    ] = (
+        manifest[
+            "total_content_bytes"
+        ]
+        + navigation_bytes
+    )
+
+    manifest[
+        "navigation_fingerprint"
+    ] = hashlib.sha256(
+        navigation_text.encode(
+            "utf-8"
+        )
+    ).hexdigest()
+
+    return manifest
+
+
+def _install_with_navigation(
+    monkeypatch: pytest.MonkeyPatch,
+    raw: dict,
+    vault: Path,
+) -> None:
+    _install(
+        monkeypatch,
+        raw,
+        vault,
+    )
+
+    monkeypatch.setattr(
+        apply,
+        "build_projection_manifest",
+        lambda **_kwargs: (
+            _manifest_with_navigation(
+                raw,
+                vault,
+            )
+        ),
+    )
+
+
+def test_navigation_targets_are_written(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    raw = _raw()
+    vault = tmp_path / "vault"
+
+    _install_with_navigation(
+        monkeypatch,
+        raw,
+        vault,
+    )
+
+    result = apply.apply_projection(
+        vault_root=vault,
+    )
+
+    expected = [
+        vault / "Home.md",
+        vault / "Index" / "Tasks.md",
+        vault / "Index" / "Incidents.md",
+        vault / "Index" / "Organizations.md",
+        vault / "Index" / "system.md",
+        _target(vault),
+    ]
+
+    for target in expected:
+        assert target.exists()
+        assert apply._is_managed_file(
+            target
+        )
+
+    assert (
+        "# WorkMind"
+        in (
+            vault
+            / "Home.md"
+        ).read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert result[
+        "written_count"
+    ] == len(expected)
+
+    assert result[
+        "vault_writes_performed"
+    ] is True
+
+
+def test_unmanaged_home_blocks_navigation_apply_before_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    raw = _raw()
+    vault = tmp_path / "vault"
+
+    _install_with_navigation(
+        monkeypatch,
+        raw,
+        vault,
+    )
+
+    vault.mkdir(
+        parents=True
+    )
+
+    home = (
+        vault
+        / "Home.md"
+    )
+
+    home.write_text(
+        "# My own home\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ObsidianExportError,
+        match=(
+            "Refusing to overwrite "
+            "unmanaged Markdown file"
+        ),
+    ):
+        apply.apply_projection(
+            vault_root=vault,
+        )
+
+    assert (
+        home.read_text(
+            encoding="utf-8"
+        )
+        == "# My own home\n"
+    )
+
+    assert not _target(
+        vault
+    ).exists()
+
+
+def test_unmanaged_index_note_is_preserved(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    raw = _raw()
+    vault = tmp_path / "vault"
+
+    _install_with_navigation(
+        monkeypatch,
+        raw,
+        vault,
+    )
+
+    user_note = (
+        vault
+        / "Index"
+        / "My Notes.md"
+    )
+
+    user_note.parent.mkdir(
+        parents=True
+    )
+
+    user_note.write_text(
+        "# Keep this file\n",
+        encoding="utf-8",
+    )
+
+    result = apply.apply_projection(
+        vault_root=vault,
+        prune=True,
+    )
+
+    assert user_note.exists()
+
+    assert (
+        user_note.read_text(
+            encoding="utf-8"
+        )
+        == "# Keep this file\n"
+    )
+
+    assert result[
+        "preserved_unmanaged_count"
+    ] == 1
+
+
+def test_stale_managed_index_is_pruned(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    raw = _raw()
+    vault = tmp_path / "vault"
+
+    _install_with_navigation(
+        monkeypatch,
+        raw,
+        vault,
+    )
+
+    stale = (
+        vault
+        / "Index"
+        / "Legacy.md"
+    )
+
+    stale.parent.mkdir(
+        parents=True
+    )
+
+    stale.write_text(
+        (
+            "---\n"
+            'workmind_projection: "wm-obsidian-v1"\n'
+            "workmind_managed: true\n"
+            "workmind_kind: navigation\n"
+            "---\n"
+            "# Legacy\n"
+        ),
+        encoding="utf-8",
+    )
+
+    result = apply.apply_projection(
+        vault_root=vault,
+        prune=True,
+    )
+
+    assert not stale.exists()
+
+    assert result[
+        "pruned_count"
+    ] == 1
+
+
+def test_obsidian_configuration_is_never_managed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    raw = _raw()
+    vault = tmp_path / "vault"
+
+    _install_with_navigation(
+        monkeypatch,
+        raw,
+        vault,
+    )
+
+    config = (
+        vault
+        / ".obsidian"
+        / "app.json"
+    )
+
+    config.parent.mkdir(
+        parents=True
+    )
+
+    config.write_text(
+        '{"user": true}\n',
+        encoding="utf-8",
+    )
+
+    apply.apply_projection(
+        vault_root=vault,
+        prune=True,
+    )
+
+    assert config.exists()
+
+    assert (
+        config.read_text(
+            encoding="utf-8"
+        )
+        == '{"user": true}\n'
+    )
+
+
+def test_filtered_apply_is_rejected_before_manifest_build(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    called = False
+
+    def unexpected_manifest(
+        **_kwargs,
+    ):
+        nonlocal called
+        called = True
+        raise AssertionError(
+            "Manifest must not be built "
+            "for filtered apply."
+        )
+
+    monkeypatch.setattr(
+        apply,
+        "build_projection_manifest",
+        unexpected_manifest,
+    )
+
+    vault = tmp_path / "vault"
+
+    with pytest.raises(
+        ObsidianExportError,
+        match=(
+            "Refusing to apply "
+            "a filtered projection"
+        ),
+    ):
+        apply.apply_projection(
+            status="active",
+            vault_root=vault,
+        )
+
+    assert called is False
+    assert not vault.exists()
