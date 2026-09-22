@@ -358,6 +358,7 @@ def _relation_target(
     direction: str,
 ) -> str:
     if direction == "outgoing":
+        entity_value = item.get("to_entity")
         candidates = (
             item.get("to_entity_name"),
             item.get("to_canonical_name"),
@@ -365,12 +366,53 @@ def _relation_target(
             item.get("to_entity_id"),
         )
     else:
+        entity_value = item.get("from_entity")
         candidates = (
             item.get("from_entity_name"),
             item.get("from_canonical_name"),
             item.get("from_entity_ref"),
             item.get("from_entity_id"),
         )
+
+    if isinstance(entity_value, Mapping):
+        target_id = _inline(
+            entity_value.get("entity_id")
+        )
+        target_type = _inline(
+            entity_value.get("entity_type")
+        )
+        target_name = _inline(
+            entity_value.get("canonical_name")
+        )
+
+        if target_id and target_type and target_name:
+            try:
+                relative_path = entity_relative_path(
+                    {
+                        "entity": {
+                            "entity_id": target_id,
+                            "entity_type": target_type,
+                            "canonical_name": target_name,
+                        }
+                    }
+                )
+            except (TypeError, ValueError):
+                pass
+            else:
+                link_path = relative_path.with_suffix(
+                    ""
+                ).as_posix()
+
+                alias = (
+                    target_name
+                    .replace("|", r"\|")
+                    .replace("[", r"\[")
+                    .replace("]", r"\]")
+                )
+
+                return (
+                    f"[[{link_path}|{alias}]]"
+                )
 
     for candidate in candidates:
         value = _inline(candidate)

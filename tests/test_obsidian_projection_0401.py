@@ -297,3 +297,89 @@ def test_missing_entity_is_rejected() -> None:
                 "claims": [],
             }
         )
+
+
+def test_relations_render_as_stable_obsidian_wikilinks() -> None:
+    from packages.knowledge.obsidian_projection import (
+        render_entity_markdown,
+    )
+
+    source_id = (
+        "11111111-1111-4111-8111-111111111111"
+    )
+    incident_id = (
+        "22222222-2222-4222-8222-222222222222"
+    )
+    organization_id = (
+        "33333333-3333-4333-8333-333333333333"
+    )
+
+    snapshot = {
+        "entity": {
+            "entity_id": source_id,
+            "entity_type": "task",
+            "canonical_name": "Task Alpha",
+            "status": "active",
+        },
+        "claims": [],
+        "outgoing_relations": [
+            {
+                "relation_id": (
+                    "44444444-4444-4444-8444-444444444444"
+                ),
+                "relation_type": "has_incident",
+                "status": "active",
+                "to_entity": {
+                    "entity_id": incident_id,
+                    "entity_type": "incident",
+                    "canonical_name": "Incident Alpha",
+                    "status": "active",
+                },
+                "to_entity_id": incident_id,
+                "to_entity_name": "Incident Alpha",
+                "evidence": [],
+            }
+        ],
+        "incoming_relations": [
+            {
+                "relation_id": (
+                    "55555555-5555-4555-8555-555555555555"
+                ),
+                "relation_type": "owned_by",
+                "status": "active",
+                "from_entity": {
+                    "entity_id": organization_id,
+                    "entity_type": "organization",
+                    "canonical_name": "Organization Beta",
+                    "status": "active",
+                },
+                "from_entity_id": organization_id,
+                "from_entity_name": "Organization Beta",
+                "evidence": [],
+            }
+        ],
+        "events": [],
+        "dated_claims": [],
+        "identity_evidence": [],
+    }
+
+    markdown = render_entity_markdown(
+        snapshot
+    )
+
+    assert (
+        "[[Entities/incident/"
+        f"{incident_id}|Incident Alpha]]"
+        in markdown
+    )
+
+    assert (
+        "[[Entities/organization/"
+        f"{organization_id}|Organization Beta]]"
+        in markdown
+    )
+
+    assert (
+        f"Entities/incident/{incident_id}.md"
+        not in markdown
+    )
