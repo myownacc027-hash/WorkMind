@@ -1303,3 +1303,648 @@ def test_apply_exception_preserves_validation_diagnostics(
         assert stored.validation_json["quality_history"][0][
             "event_type"
         ] == "apply_failure"
+
+
+# PRODUCT-03B1 E2E CLAIM SUPERSESSION
+
+
+def test_product_03b1_claim_supersession_through_real_extraction_flow(
+    monkeypatch,
+    session_factory,
+    settings,
+) -> None:
+    """
+    Prove the complete durable-knowledge supersession path:
+
+        indexed source
+          -> enqueue
+          -> claim lease
+          -> extraction packet
+          -> validate bundle
+          -> apply bundle
+          -> historical claim superseded by new claim
+
+    The test uses the module's SQLite in-memory database only.
+    No production PostgreSQL or Qdrant access is allowed.
+    """
+    import json
+
+    from sqlalchemy import select
+
+    from packages.database.models import (
+        DocumentChunk,
+        ExternalDocument,
+        KnowledgeClaim,
+        KnowledgeEntity,
+        KnowledgeEvidence,
+        KnowledgeExtractionJob,
+    )
+    import packages.knowledge.extraction as extraction
+    import packages.knowledge.identity_resolution as identity_resolution
+    import packages.knowledge.service as knowledge_service
+
+    monkeypatch.setattr(
+        extraction,
+        "SessionLocal",
+        session_factory,
+    )
+    monkeypatch.setattr(
+        extraction,
+        "get_settings",
+        lambda: settings,
+    )
+    # SQLite drops timezone information from DateTime values.
+    # Keep extraction clock naive UTC inside this SQLite-only E2E.
+    sqlite_now = lambda: datetime.now(UTC).replace(tzinfo=None)
+
+    monkeypatch.setattr(
+        extraction,
+        "_now",
+        sqlite_now,
+    )
+    monkeypatch.setattr(
+        knowledge_service,
+        "SessionLocal",
+        session_factory,
+    )
+
+    def no_semantic_results(*_args, **_kwargs):
+        return {
+            "results": [],
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(
+        identity_resolution,
+        "search_hybrid",
+        no_semantic_results,
+    )
+
+    entity_name = "Test System Alpha"
+
+    v1_text = (
+        "Test System Alpha status is active."
+    )
+    v2_text = (
+        "Test System Alpha status is disabled."
+    )
+
+    # ------------------------------------------------------------------
+    # VERSION 1
+    # ------------------------------------------------------------------
+
+    document_v1 = ExternalDocument(
+        id=uuid.uuid4(),
+        original_filename="product-03b1-v1.txt",
+        archive_path="test://product-03b1/v1",
+        mime_type="text/plain",
+        content_hash="a" * 64,
+        size_bytes=len(v1_text.encode("utf-8")),
+        processing_status="indexed",
+        extraction_method="test",
+        extracted_chars=len(v1_text),
+        metadata_json={
+            "test_case": "PRODUCT-03B1",
+            "version": 1,
+        },
+    )
+
+    chunk_v1 = DocumentChunk(
+        source_type="document",
+        source_id=document_v1.id,
+        chunk_index=0,
+        text=v1_text,
+        content_hash="1" * 64,
+        embedding_status="indexed",
+        metadata_json={
+            "test_case": "PRODUCT-03B1",
+            "version": 1,
+        },
+    )
+
+    with session_factory() as session:
+        session.add_all(
+            [
+                document_v1,
+                chunk_v1,
+            ]
+        )
+        session.flush()
+
+        queued_v1 = extraction.enqueue_indexed_source(
+            session,
+            source_type="document",
+            source_id=document_v1.id,
+            settings=settings,
+            reason="product_03b1_v1",
+        )
+
+        assert queued_v1["queued"] is True
+
+        job_v1_id = queued_v1["job_id"]
+
+        session.commit()
+
+    leased_v1 = extraction.claim_extraction_jobs(
+        limit=1,
+    )
+
+    assert len(leased_v1) == 1
+    assert str(leased_v1[0].id) == job_v1_id
+    assert leased_v1[0].status == "leased"
+    assert leased_v1[0].lease_token is not None
+
+    lease_v1 = leased_v1[0].lease_token
+
+    packet_v1 = extraction.build_extraction_packet(
+        job_v1_id,
+    )
+
+    assert (
+        packet_v1["job"]["status"]
+        == "leased"
+    )
+    assert (
+        packet_v1["job"]["extraction_blocked"]
+        is False
+    )
+
+    evidence_v1 = next(
+        item
+        for item in packet_v1["allowed_evidence"]
+        if item["chunk_id"] == str(chunk_v1.id)
+    )
+
+    bundle_v1 = {
+        "entities": [
+            {
+                "key": "test_system_alpha",
+                "entity_type": "system",
+                "canonical_name": entity_name,
+            }
+        ],
+        "claims": [
+            {
+                "subject_key": "test_system_alpha",
+                "predicate": "status",
+                "object_text": "active",
+                "claim_text": (
+                    "Test System Alpha status is active."
+                ),
+                "evidence_type": "direct_statement",
+                "confidence": 1.0,
+                "status": "active",
+                "observed_at": (
+                    "2026-09-22T09:00:00+00:00"
+                ),
+                "evidence": [
+                    {
+                        "source_ref": (
+                            evidence_v1["source_ref"]
+                        ),
+                        "chunk_id": (
+                            evidence_v1["chunk_id"]
+                        ),
+                        "excerpt": v1_text,
+                        "evidence_role": (
+                            "direct_statement"
+                        ),
+                    }
+                ],
+            }
+        ],
+        "relations": [],
+        "events": [],
+    }
+
+    validation_v1 = (
+        extraction.validate_extraction_job(
+            job_v1_id,
+            lease_v1,
+            json.dumps(
+                bundle_v1,
+                ensure_ascii=False,
+            ),
+        )
+    )
+
+    assert validation_v1["status"] == "validated"
+    assert (
+        validation_v1["validation"]["ok"]
+        is True
+    )
+
+    applied_v1 = (
+        extraction.apply_validated_extraction_job(
+            job_v1_id
+        )
+    )
+
+    assert applied_v1["status"] == "completed"
+    assert (
+        applied_v1["apply_result"]["ok"]
+        is True
+    )
+
+    with session_factory() as session:
+        entities_after_v1 = list(
+            session.scalars(
+                select(KnowledgeEntity).where(
+                    KnowledgeEntity.entity_type
+                    == "system",
+                    KnowledgeEntity.canonical_name
+                    == entity_name,
+                )
+            )
+        )
+
+        assert len(entities_after_v1) == 1
+
+        entity_id = entities_after_v1[0].id
+
+        claims_after_v1 = list(
+            session.scalars(
+                select(KnowledgeClaim).where(
+                    KnowledgeClaim.subject_entity_id
+                    == entity_id,
+                    KnowledgeClaim.predicate
+                    == "status",
+                )
+            )
+        )
+
+        assert len(claims_after_v1) == 1
+
+        claim_v1 = claims_after_v1[0]
+
+        assert claim_v1.object_text == "active"
+        assert claim_v1.status == "active"
+        assert claim_v1.supersedes_claim_id is None
+        assert (
+            claim_v1.superseded_by_claim_id
+            is None
+        )
+
+        claim_v1_id = claim_v1.id
+
+        evidence_after_v1 = list(
+            session.scalars(
+                select(KnowledgeEvidence).where(
+                    KnowledgeEvidence.claim_id
+                    == claim_v1_id
+                )
+            )
+        )
+
+        assert len(evidence_after_v1) == 1
+        assert (
+            evidence_after_v1[0].chunk_id
+            == chunk_v1.id
+        )
+
+    # ------------------------------------------------------------------
+    # VERSION 2
+    # ------------------------------------------------------------------
+
+    document_v2 = ExternalDocument(
+        id=uuid.uuid4(),
+        original_filename="product-03b1-v2.txt",
+        archive_path="test://product-03b1/v2",
+        mime_type="text/plain",
+        content_hash="b" * 64,
+        size_bytes=len(v2_text.encode("utf-8")),
+        processing_status="indexed",
+        extraction_method="test",
+        extracted_chars=len(v2_text),
+        metadata_json={
+            "test_case": "PRODUCT-03B1",
+            "version": 2,
+        },
+    )
+
+    chunk_v2 = DocumentChunk(
+        source_type="document",
+        source_id=document_v2.id,
+        chunk_index=0,
+        text=v2_text,
+        content_hash="2" * 64,
+        embedding_status="indexed",
+        metadata_json={
+            "test_case": "PRODUCT-03B1",
+            "version": 2,
+        },
+    )
+
+    with session_factory() as session:
+        session.add_all(
+            [
+                document_v2,
+                chunk_v2,
+            ]
+        )
+        session.flush()
+
+        queued_v2 = extraction.enqueue_indexed_source(
+            session,
+            source_type="document",
+            source_id=document_v2.id,
+            settings=settings,
+            reason="product_03b1_v2",
+        )
+
+        assert queued_v2["queued"] is True
+
+        job_v2_id = queued_v2["job_id"]
+
+        session.commit()
+
+    def historical_semantic_result(
+        *_args,
+        **_kwargs,
+    ):
+        return {
+            "results": [
+                {
+                    "source_ref": (
+                        "workmind://document/"
+                        f"{document_v1.id}"
+                    ),
+                    "matched_chunks": [
+                        {
+                            "chunk_id": (
+                                str(chunk_v1.id)
+                            ),
+                            "semantic_score": 0.99,
+                        }
+                    ],
+                }
+            ],
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(
+        identity_resolution,
+        "search_hybrid",
+        historical_semantic_result,
+    )
+
+    leased_v2 = extraction.claim_extraction_jobs(
+        limit=1,
+    )
+
+    assert len(leased_v2) == 1
+    assert str(leased_v2[0].id) == job_v2_id
+    assert leased_v2[0].status == "leased"
+    assert leased_v2[0].lease_token is not None
+
+    lease_v2 = leased_v2[0].lease_token
+
+    packet_v2 = extraction.build_extraction_packet(
+        job_v2_id,
+    )
+
+    assert (
+        packet_v2["job"]["extraction_blocked"]
+        is False
+    )
+
+    candidate = next(
+        (
+            item
+            for item
+            in packet_v2["identity_candidates"]
+            if item.get("entity_id")
+            == str(entity_id)
+        ),
+        None,
+    )
+
+    assert candidate is not None
+
+    candidate_old_claim = next(
+        (
+            item
+            for item
+            in candidate.get(
+                "active_claims",
+                [],
+            )
+            if (
+                item.get("predicate")
+                == "status"
+                and item.get("object_text")
+                == "active"
+            )
+        ),
+        None,
+    )
+
+    assert candidate_old_claim is not None
+    assert (
+        candidate_old_claim["claim_id"]
+        == str(claim_v1_id)
+    )
+
+    evidence_v2 = next(
+        item
+        for item in packet_v2["allowed_evidence"]
+        if item["chunk_id"] == str(chunk_v2.id)
+    )
+
+    bundle_v2 = {
+        "entities": [
+            {
+                "key": "test_system_alpha",
+                "entity_id": candidate["entity_id"],
+                "entity_type": "system",
+                "canonical_name": entity_name,
+            }
+        ],
+        "claims": [
+            {
+                "subject_key": "test_system_alpha",
+                "predicate": "status",
+                "object_text": "disabled",
+                "claim_text": (
+                    "Test System Alpha status "
+                    "is disabled."
+                ),
+                "evidence_type": "direct_statement",
+                "confidence": 1.0,
+                "status": "active",
+                "observed_at": (
+                    "2026-09-22T10:00:00+00:00"
+                ),
+                "supersedes_claim_id": (
+                    candidate_old_claim[
+                        "claim_id"
+                    ]
+                ),
+                "evidence": [
+                    {
+                        "source_ref": (
+                            evidence_v2["source_ref"]
+                        ),
+                        "chunk_id": (
+                            evidence_v2["chunk_id"]
+                        ),
+                        "excerpt": v2_text,
+                        "evidence_role": (
+                            "direct_statement"
+                        ),
+                    }
+                ],
+            }
+        ],
+        "relations": [],
+        "events": [],
+    }
+
+    validation_v2 = (
+        extraction.validate_extraction_job(
+            job_v2_id,
+            lease_v2,
+            json.dumps(
+                bundle_v2,
+                ensure_ascii=False,
+            ),
+        )
+    )
+
+    assert validation_v2["status"] == "validated"
+    assert (
+        validation_v2["validation"]["ok"]
+        is True
+    )
+
+    applied_v2 = (
+        extraction.apply_validated_extraction_job(
+            job_v2_id
+        )
+    )
+
+    assert applied_v2["status"] == "completed"
+    assert (
+        applied_v2["apply_result"]["ok"]
+        is True
+    )
+
+    # ------------------------------------------------------------------
+    # FINAL DURABLE STATE
+    # ------------------------------------------------------------------
+
+    with session_factory() as session:
+        entities = list(
+            session.scalars(
+                select(KnowledgeEntity).where(
+                    KnowledgeEntity.entity_type
+                    == "system",
+                    KnowledgeEntity.canonical_name
+                    == entity_name,
+                )
+            )
+        )
+
+        assert len(entities) == 1
+        assert entities[0].id == entity_id
+
+        claims = list(
+            session.scalars(
+                select(KnowledgeClaim)
+                .where(
+                    KnowledgeClaim.subject_entity_id
+                    == entity_id,
+                    KnowledgeClaim.predicate
+                    == "status",
+                )
+                .order_by(
+                    KnowledgeClaim.created_at,
+                    KnowledgeClaim.id,
+                )
+            )
+        )
+
+        assert len(claims) == 2
+
+        active_claims = [
+            item
+            for item in claims
+            if item.status == "active"
+        ]
+
+        superseded_claims = [
+            item
+            for item in claims
+            if item.status == "superseded"
+        ]
+
+        assert len(active_claims) == 1
+        assert len(superseded_claims) == 1
+
+        new_claim = active_claims[0]
+        old_claim = superseded_claims[0]
+
+        assert old_claim.id == claim_v1_id
+        assert old_claim.object_text == "active"
+
+        assert new_claim.object_text == "disabled"
+
+        assert (
+            new_claim.supersedes_claim_id
+            == old_claim.id
+        )
+
+        assert (
+            old_claim.superseded_by_claim_id
+            == new_claim.id
+        )
+
+        assert old_claim.valid_to is not None
+
+        evidence_rows = list(
+            session.scalars(
+                select(KnowledgeEvidence).where(
+                    KnowledgeEvidence.claim_id.in_(
+                        [
+                            old_claim.id,
+                            new_claim.id,
+                        ]
+                    )
+                )
+            )
+        )
+
+        assert len(evidence_rows) == 2
+
+        evidence_chunk_ids = {
+            item.chunk_id
+            for item in evidence_rows
+        }
+
+        assert evidence_chunk_ids == {
+            chunk_v1.id,
+            chunk_v2.id,
+        }
+
+        jobs = list(
+            session.scalars(
+                select(KnowledgeExtractionJob)
+            )
+        )
+
+        assert len(jobs) == 2
+
+        assert {
+            item.status
+            for item in jobs
+        } == {
+            "completed",
+        }
+
+        assert {
+            str(item.id)
+            for item in jobs
+        } == {
+            job_v1_id,
+            job_v2_id,
+        }
