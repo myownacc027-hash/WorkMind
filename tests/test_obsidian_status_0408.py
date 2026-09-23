@@ -484,3 +484,131 @@ def test_cli_status_help_has_no_mutating_options() -> None:
         "--status",
     ):
         assert option not in result.stdout
+
+
+def test_cli_status_check_sync_exits_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+
+    monkeypatch.setattr(
+        cli,
+        "projection_status",
+        lambda **_kwargs: {
+            "in_sync": True,
+            "missing_count": 0,
+            "changed_count": 0,
+            "stale_managed_count": 0,
+            "conflict_count": 0,
+            "vault_writes_performed": False,
+        },
+    )
+
+    result = runner.invoke(
+        cli.app,
+        [
+            "status",
+            "--check",
+        ],
+    )
+
+    assert result.exit_code == 0
+
+    assert (
+        '"in_sync": true'
+        in result.stdout.lower()
+    )
+
+
+def test_cli_status_check_drift_exits_one_after_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+
+    monkeypatch.setattr(
+        cli,
+        "projection_status",
+        lambda **_kwargs: {
+            "in_sync": False,
+            "missing_count": 1,
+            "changed_count": 0,
+            "stale_managed_count": 0,
+            "conflict_count": 0,
+            "missing_paths": [
+                "Entities/task/Missing.md"
+            ],
+            "vault_writes_performed": False,
+        },
+    )
+
+    result = runner.invoke(
+        cli.app,
+        [
+            "status",
+            "--check",
+        ],
+    )
+
+    assert result.exit_code == 1
+
+    assert (
+        '"in_sync": false'
+        in result.stdout.lower()
+    )
+
+    assert (
+        "Entities/task/Missing.md"
+        in result.stdout
+    )
+
+
+def test_cli_plain_status_drift_remains_informational(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+
+    monkeypatch.setattr(
+        cli,
+        "projection_status",
+        lambda **_kwargs: {
+            "in_sync": False,
+            "missing_count": 1,
+            "changed_count": 0,
+            "stale_managed_count": 0,
+            "conflict_count": 0,
+            "vault_writes_performed": False,
+        },
+    )
+
+    result = runner.invoke(
+        cli.app,
+        [
+            "status",
+        ],
+    )
+
+    assert result.exit_code == 0
+
+    assert (
+        '"in_sync": false'
+        in result.stdout.lower()
+    )
+
+
+def test_cli_status_help_exposes_check_option() -> None:
+    runner = CliRunner()
+
+    result = runner.invoke(
+        cli.app,
+        [
+            "status",
+            "--help",
+        ],
+    )
+
+    assert result.exit_code == 0
+
+    assert (
+        "--check"
+        in result.stdout
+    )

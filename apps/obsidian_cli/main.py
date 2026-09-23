@@ -96,6 +96,11 @@ def status_command(
         file_okay=False,
         help="Override the configured Obsidian vault root.",
     ),
+    check: bool = typer.Option(
+        False,
+        "--check",
+        help="Exit with code 1 when the vault is not in sync.",
+    ),
 ) -> None:
     """
     Compare the complete WorkMind projection with the vault without writing.
@@ -112,6 +117,17 @@ def status_command(
     _echo_json(
         result
     )
+
+    if (
+        check
+        and not result.get(
+            "in_sync",
+            False,
+        )
+    ):
+        raise typer.Exit(
+            code=1
+        )
 
 
 @app.command("apply")
