@@ -27,7 +27,7 @@ from packages.knowledge.obsidian_projection import (
 )
 
 
-MANIFEST_VERSION = "wm-obsidian-manifest-v1"
+MANIFEST_VERSION = "wm-obsidian-manifest-v2"
 
 
 class ObsidianExportError(RuntimeError):
@@ -635,9 +635,26 @@ def build_projection_manifest(
         )
     )
 
+    entity_bytes = sum(
+        int(item["content_bytes"])
+        for item in entries
+    )
+
     navigation_bytes = sum(
         int(item["content_bytes"])
         for item in navigation_entries
+    )
+
+    entity_fingerprint = (
+        _sha256_text(
+            "\n".join(
+                (
+                    f"{item['relative_path']} "
+                    f"{item['content_sha256']}"
+                )
+                for item in entries
+            )
+        )
     )
 
     navigation_fingerprint = (
@@ -652,19 +669,28 @@ def build_projection_manifest(
         )
     )
 
-    total_bytes = sum(
-        int(item["content_bytes"])
+    projection_lines = [
+        (
+            f"entity "
+            f"{item['relative_path']} "
+            f"{item['content_sha256']}"
+        )
         for item in entries
+    ]
+
+    projection_lines.extend(
+        (
+            f"navigation "
+            f"{item['relative_path']} "
+            f"{item['content_sha256']}"
+        )
+        for item in navigation_entries
     )
 
-    manifest_fingerprint = (
+    projection_fingerprint = (
         _sha256_text(
             "\n".join(
-                (
-                    f"{item['relative_path']} "
-                    f"{item['content_sha256']}"
-                )
-                for item in entries
+                projection_lines
             )
         )
     )
@@ -692,8 +718,11 @@ def build_projection_manifest(
                 selection["total_count"]
             )
         ),
+        "entity_content_bytes": (
+            entity_bytes
+        ),
         "total_content_bytes": (
-            total_bytes
+            entity_bytes
         ),
         "navigation_entry_count": len(
             navigation_entries
@@ -706,14 +735,20 @@ def build_projection_manifest(
             + len(navigation_entries)
         ),
         "projected_content_bytes": (
-            total_bytes
+            entity_bytes
             + navigation_bytes
+        ),
+        "entity_fingerprint": (
+            entity_fingerprint
         ),
         "navigation_fingerprint": (
             navigation_fingerprint
         ),
+        "projection_fingerprint": (
+            projection_fingerprint
+        ),
         "manifest_fingerprint": (
-            manifest_fingerprint
+            projection_fingerprint
         ),
         "entries": entries,
         "navigation_entries": (
