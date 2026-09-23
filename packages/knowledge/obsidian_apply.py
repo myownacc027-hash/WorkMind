@@ -639,6 +639,266 @@ def _preflight_vault(
 
 
 
+
+def projection_status(
+    *,
+    include_excerpt: bool = False,
+    vault_root: str | Path | None = None,
+) -> dict[str, Any]:
+    """
+    Compare the complete desired WorkMind projection with the vault.
+
+    This operation is strictly read-only. It reports missing, changed,
+    unchanged, stale managed, and conflicting targets without writing or
+    pruning anything.
+    """
+
+    manifest = build_projection_manifest(
+        limit=None,
+        status=None,
+        include_excerpt=include_excerpt,
+        vault_root=vault_root,
+    )
+
+    if not manifest.get(
+        "selection_complete"
+    ):
+        raise ObsidianExportError(
+            "Refusing to inspect incomplete projection."
+        )
+
+    root = Path(
+        str(
+            manifest[
+                "vault_root"
+            ]
+        )
+    )
+
+    payloads = _render_manifest_payloads(
+        manifest,
+        include_excerpt=include_excerpt,
+    )
+
+    manage_navigation = bool(
+        manifest.get(
+            "navigation_entries"
+        )
+    )
+
+    desired_targets: dict[
+        Path,
+        bytes,
+    ] = {}
+
+    for relative_path, payload in payloads.items():
+        target = _safe_target_path(
+            root,
+            relative_path,
+        )
+
+        desired_targets[
+            target
+        ] = payload
+
+    missing: list[Path] = []
+    changed: list[Path] = []
+    unchanged: list[Path] = []
+    conflicts: list[Path] = []
+
+    for target, payload in desired_targets.items():
+        if target.is_symlink():
+            conflicts.append(
+                target
+            )
+            continue
+
+        if not target.exists():
+            missing.append(
+                target
+            )
+            continue
+
+        if not target.is_file():
+            conflicts.append(
+                target
+            )
+            continue
+
+        if not _is_managed_file(
+            target
+        ):
+            conflicts.append(
+                target
+            )
+            continue
+
+        existing_hash = hashlib.sha256(
+            target.read_bytes()
+        ).hexdigest()
+
+        desired_hash = hashlib.sha256(
+            payload
+        ).hexdigest()
+
+        if existing_hash == desired_hash:
+            unchanged.append(
+                target
+            )
+        else:
+            changed.append(
+                target
+            )
+
+    stale_managed: list[Path] = []
+    candidates: list[Path] = []
+
+    entities_root = root / "Entities"
+
+    if entities_root.exists():
+        candidates.extend(
+            entities_root.rglob(
+                "*.md"
+            )
+        )
+
+    if manage_navigation:
+        home = root / "Home.md"
+
+        if (
+            home.exists()
+            or home.is_symlink()
+        ):
+            candidates.append(
+                home
+            )
+
+        index_root = root / "Index"
+
+        if index_root.exists():
+            candidates.extend(
+                index_root.rglob(
+                    "*.md"
+                )
+            )
+
+    desired_paths = set(
+        desired_targets
+    )
+
+    for candidate in sorted(
+        set(candidates),
+        key=lambda item: str(item),
+    ):
+        if candidate in desired_paths:
+            continue
+
+        if candidate.is_symlink():
+            continue
+
+        if not candidate.is_file():
+            continue
+
+        if _is_managed_file(
+            candidate
+        ):
+            stale_managed.append(
+                candidate
+            )
+
+    def relative_paths(
+        values: list[Path],
+    ) -> list[str]:
+        return [
+            value.relative_to(
+                root
+            ).as_posix()
+            for value in sorted(
+                values,
+                key=lambda item: str(item),
+            )
+        ]
+
+    missing_paths = relative_paths(
+        missing
+    )
+
+    changed_paths = relative_paths(
+        changed
+    )
+
+    unchanged_paths = relative_paths(
+        unchanged
+    )
+
+    stale_paths = relative_paths(
+        stale_managed
+    )
+
+    conflict_paths = relative_paths(
+        conflicts
+    )
+
+    in_sync = not any(
+        (
+            missing_paths,
+            changed_paths,
+            stale_paths,
+            conflict_paths,
+        )
+    )
+
+    return {
+        "manifest_version": manifest[
+            "manifest_version"
+        ],
+        "projection_version": manifest[
+            "projection_version"
+        ],
+        "projection_fingerprint": manifest[
+            "projection_fingerprint"
+        ],
+        "manifest_fingerprint": manifest[
+            "manifest_fingerprint"
+        ],
+        "vault_root": str(root),
+        "selected_entity_count": manifest[
+            "selected_entity_count"
+        ],
+        "selection_complete": True,
+        "desired_file_count": len(
+            desired_targets
+        ),
+        "current_managed_count": (
+            len(unchanged)
+            + len(changed)
+            + len(stale_managed)
+        ),
+        "unchanged_count": len(
+            unchanged_paths
+        ),
+        "missing_count": len(
+            missing_paths
+        ),
+        "changed_count": len(
+            changed_paths
+        ),
+        "stale_managed_count": len(
+            stale_paths
+        ),
+        "conflict_count": len(
+            conflict_paths
+        ),
+        "unchanged_paths": unchanged_paths,
+        "missing_paths": missing_paths,
+        "changed_paths": changed_paths,
+        "stale_managed_paths": stale_paths,
+        "conflict_paths": conflict_paths,
+        "in_sync": in_sync,
+        "vault_writes_performed": False,
+    }
+
+
 def apply_projection(
     *,
     limit: int | None = None,

@@ -7,6 +7,7 @@ from typing import Any
 import typer
 
 from packages.knowledge.obsidian_apply import apply_projection
+from packages.knowledge.obsidian_apply import projection_status
 from packages.knowledge.obsidian_export import (
     ObsidianExportError,
     build_projection_manifest,
@@ -79,6 +80,38 @@ def dry_run(
         _domain_error(exc)
 
     _echo_json(result)
+
+
+
+@app.command("status")
+def status_command(
+    include_excerpt: bool = typer.Option(
+        False,
+        "--include-excerpt",
+        help="Include evidence excerpts in generated Markdown comparison.",
+    ),
+    vault_root: Path | None = typer.Option(
+        None,
+        "--vault-root",
+        file_okay=False,
+        help="Override the configured Obsidian vault root.",
+    ),
+) -> None:
+    """
+    Compare the complete WorkMind projection with the vault without writing.
+    """
+
+    try:
+        result = projection_status(
+            include_excerpt=include_excerpt,
+            vault_root=vault_root,
+        )
+    except ObsidianExportError as exc:
+        _domain_error(exc)
+
+    _echo_json(
+        result
+    )
 
 
 @app.command("apply")
