@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import unicodedata
+
 import json
 import re
 import uuid
@@ -140,25 +143,165 @@ def _excerpt(value: Any) -> str:
     )
 
 
+_WINDOWS_RESERVED_BASENAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    *(f"COM{number}" for number in range(1, 10)),
+    *(f"LPT{number}" for number in range(1, 10)),
+}
+
+_MAX_ENTITY_FILENAME_STEM_CHARS = 120
+
+
+def _entity_filename(
+    canonical_name: str,
+) -> str:
+    """
+    Build a readable, deterministic Windows-safe Markdown filename.
+
+    The canonical name remains visible whenever practical. UUID identity
+    stays in frontmatter rather than in the normal Obsidian filename.
+    """
+
+    original = str(
+        canonical_name
+        or ""
+    ).strip()
+
+    if not original:
+        raise ObsidianProjectionError(
+            "Entity does not contain canonical_name."
+        )
+
+    value = unicodedata.normalize(
+        "NFC",
+        original,
+    )
+
+    value = "".join(
+        (
+            " "
+            if unicodedata.category(
+                char
+            ).startswith("C")
+            else char
+        )
+        for char in value
+    )
+
+    value = re.sub(
+        r'[<>:"/\\|?*]+',
+        " - ",
+        value,
+    )
+
+    value = re.sub(
+        r"\s+",
+        " ",
+        value,
+    ).strip(" .")
+
+    if (
+        not value
+        or not value.strip(
+            " .-_"
+        )
+    ):
+        raise ObsidianProjectionError(
+            "canonical_name cannot produce "
+            "a safe Obsidian filename."
+        )
+
+    first_component = (
+        value.split(
+            ".",
+            1,
+        )[0]
+        .rstrip(" .")
+        .upper()
+    )
+
+    if (
+        first_component
+        in _WINDOWS_RESERVED_BASENAMES
+    ):
+        value = (
+            "_"
+            + value
+        )
+
+    if (
+        len(value)
+        > _MAX_ENTITY_FILENAME_STEM_CHARS
+    ):
+        digest = hashlib.sha256(
+            original.encode(
+                "utf-8"
+            )
+        ).hexdigest()[:8]
+
+        suffix = (
+            f" [{digest}]"
+        )
+
+        prefix_chars = (
+            _MAX_ENTITY_FILENAME_STEM_CHARS
+            - len(suffix)
+        )
+
+        prefix = value[
+            :prefix_chars
+        ].rstrip(
+            " .-_"
+        )
+
+        if not prefix:
+            prefix = "entity"
+
+        value = (
+            prefix
+            + suffix
+        )
+
+    return (
+        value
+        + ".md"
+    )
+
+
+
 def entity_relative_path(
     snapshot: Mapping[str, Any],
 ) -> Path:
     """
-    Return the stable path of one entity inside the managed projection.
+    Return the readable managed path of one entity.
 
-    Canonical names are deliberately not used in filenames. A rename of an
-    entity must update the existing projection rather than create a second
-    note with another filename.
+    Entity identity remains the UUID stored in WorkMind metadata.
+    Renaming a canonical entity name intentionally changes the projected
+    Markdown path; the safe writer prunes the obsolete managed note.
     """
 
-    entity = _entity(snapshot)
+    entity = _entity(
+        snapshot
+    )
+
+    # Keep UUID validation even though UUID is no longer part of the
+    # human-facing filename.
+    _entity_id(
+        entity
+    )
 
     return (
         Path("Entities")
         / _entity_type(entity)
-        / f"{_entity_id(entity)}.md"
+        / _entity_filename(
+            _canonical_name(
+                entity
+            )
+        )
     )
-
 
 def _evidence_sort_key(
     item: Mapping[str, Any],

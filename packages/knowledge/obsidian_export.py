@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import unicodedata
+
 import hashlib
 import uuid
 from collections.abc import Mapping
@@ -518,6 +520,36 @@ def build_projection_manifest(
             item["entity_id"],
         )
     )
+
+    path_owners: dict[
+        str,
+        dict[str, Any],
+    ] = {}
+
+    for entry in entries:
+        collision_key = unicodedata.normalize(
+            "NFC",
+            str(
+                entry["relative_path"]
+            ),
+        ).casefold()
+
+        previous = path_owners.get(
+            collision_key
+        )
+
+        if previous is not None:
+            raise ObsidianExportError(
+                "Projection path collision between "
+                "entities "
+                f"{previous['entity_id']} and "
+                f"{entry['entity_id']}: "
+                f"{entry['relative_path']}"
+            )
+
+        path_owners[
+            collision_key
+        ] = entry
 
     navigation_pages = (
         render_navigation_pages(

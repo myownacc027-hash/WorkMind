@@ -175,7 +175,7 @@ def _snapshot() -> dict:
     }
 
 
-def test_entity_projection_path_is_stable_across_rename() -> None:
+def test_projection_path_tracks_canonical_name() -> None:
     first = _snapshot()
     renamed = _snapshot()
 
@@ -189,8 +189,13 @@ def test_entity_projection_path_is_stable_across_rename() -> None:
         / f"{ENTITY_ID}.md"
     )
 
-    assert entity_relative_path(first) == expected
-    assert entity_relative_path(renamed) == expected
+    first_path = entity_relative_path(first)
+    renamed_path = entity_relative_path(renamed)
+
+    assert first_path != renamed_path
+    assert first_path.parent == renamed_path.parent
+    assert first_path.suffix == ".md"
+    assert renamed_path.suffix == ".md"
 
 
 def test_projection_preserves_history_and_provenance() -> None:
@@ -369,17 +374,167 @@ def test_relations_render_as_stable_obsidian_wikilinks() -> None:
 
     assert (
         "[[Entities/incident/"
-        f"{incident_id}|Incident Alpha]]"
+        "Incident Alpha|Incident Alpha]]"
         in markdown
     )
 
     assert (
         "[[Entities/organization/"
-        f"{organization_id}|Organization Beta]]"
+        "Organization Beta|Organization Beta]]"
         in markdown
     )
 
     assert (
-        f"Entities/incident/{incident_id}.md"
+        "Entities/incident/Incident Alpha.md"
         not in markdown
+    )
+
+
+
+def test_entity_path_uses_readable_cyrillic_name() -> None:
+    name = (
+        "\u0418\u043d\u0446\u0438\u0434\u0435\u043d\u0442 "
+        "\u041124 \u2116203548"
+    )
+
+    snapshot = {
+        "entity": {
+            "entity_id": (
+                "11111111-1111-4111-8111-111111111111"
+            ),
+            "entity_type": "incident",
+            "canonical_name": name,
+        }
+    }
+
+    assert (
+        entity_relative_path(
+            snapshot
+        ).as_posix()
+        == (
+            "Entities/incident/"
+            + name
+            + ".md"
+        )
+    )
+
+
+
+def test_entity_path_sanitizes_windows_forbidden_characters() -> None:
+    name = (
+        "\u041f\u043b\u0430\u043d: "
+        "\u044d\u0442\u0430\u043f/"
+        "\u043f\u043e\u0434\u044d\u0442\u0430\u043f*"
+    )
+
+    expected = (
+        "\u041f\u043b\u0430\u043d - "
+        "\u044d\u0442\u0430\u043f - "
+        "\u043f\u043e\u0434\u044d\u0442\u0430\u043f -"
+    )
+
+    snapshot = {
+        "entity": {
+            "entity_id": (
+                "11111111-1111-4111-8111-111111111111"
+            ),
+            "entity_type": "task",
+            "canonical_name": name,
+        }
+    }
+
+    assert (
+        entity_relative_path(
+            snapshot
+        ).as_posix()
+        == (
+            "Entities/task/"
+            + expected
+            + ".md"
+        )
+    )
+
+
+def test_entity_path_avoids_windows_reserved_basename() -> None:
+    snapshot = {
+        "entity": {
+            "entity_id": (
+                "11111111-1111-4111-8111-111111111111"
+            ),
+            "entity_type": "system",
+            "canonical_name": "CON",
+        }
+    }
+
+    assert (
+        entity_relative_path(
+            snapshot
+        ).as_posix()
+        == "Entities/system/_CON.md"
+    )
+
+
+
+def test_long_entity_path_is_bounded_and_deterministic() -> None:
+    first = {
+        "entity": {
+            "entity_id": (
+                "11111111-1111-4111-8111-111111111111"
+            ),
+            "entity_type": "task",
+            "canonical_name": (
+                "Very long task name "
+                + ("segment " * 40)
+            ),
+        }
+    }
+
+    second = {
+        "entity": {
+            **first["entity"],
+            "entity_id": (
+                "22222222-2222-4222-8222-222222222222"
+            ),
+        }
+    }
+
+    different = {
+        "entity": {
+            **first["entity"],
+            "canonical_name": (
+                first["entity"]["canonical_name"]
+                + "different"
+            ),
+        }
+    }
+
+    first_path = entity_relative_path(
+        first
+    )
+
+    second_path = entity_relative_path(
+        second
+    )
+
+    different_path = entity_relative_path(
+        different
+    )
+
+    # Same visible name intentionally produces the same candidate path.
+    # Manifest-level collision handling is added in OBSIDIAN-01G2.
+    assert first_path == second_path
+
+    assert (
+        first_path
+        != different_path
+    )
+
+    assert (
+        len(first_path.stem)
+        <= 120
+    )
+
+    assert (
+        first_path.suffix
+        == ".md"
     )

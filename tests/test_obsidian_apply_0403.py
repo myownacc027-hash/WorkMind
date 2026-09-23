@@ -228,15 +228,28 @@ def _install(
     )
 
 
+
 def _target(
     vault: Path,
     entity_id: str = ENTITY_A,
+    name: str = "Test System Alpha",
 ) -> Path:
+    raw = _raw(
+        entity_id=entity_id,
+        name=name,
+    )
+
+    snapshot = (
+        apply.normalize_service_snapshot(
+            raw
+        )
+    )
+
     return (
         vault
-        / "Entities"
-        / "system"
-        / f"{entity_id}.md"
+        / entity_relative_path(
+            snapshot
+        )
     )
 
 
@@ -358,6 +371,7 @@ def test_unmanaged_target_blocks_apply(
     )
 
 
+
 def test_managed_target_can_be_updated(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -371,6 +385,11 @@ def test_managed_target_can_be_updated(
         vault,
     )
 
+    old_target = _target(
+        vault,
+        name="Test System Alpha",
+    )
+
     first = apply.apply_projection(
         vault_root=vault,
     )
@@ -378,6 +397,8 @@ def test_managed_target_can_be_updated(
     assert first[
         "written_count"
     ] == 1
+
+    assert old_target.exists()
 
     raw["canonical_name"] = (
         "Test System Alpha Renamed"
@@ -396,17 +417,21 @@ def test_managed_target_can_be_updated(
         raw["claims"][0]
     )
 
+    new_target = _target(
+        vault,
+        name=(
+            "Test System Alpha Renamed"
+        ),
+    )
+
     second = apply.apply_projection(
         vault_root=vault,
     )
 
-    assert second[
-        "written_count"
-    ] == 1
+    assert not old_target.exists()
+    assert new_target.exists()
 
-    text = _target(
-        vault
-    ).read_text(
+    text = new_target.read_text(
         encoding="utf-8"
     )
 
@@ -414,6 +439,14 @@ def test_managed_target_can_be_updated(
         "# Test System Alpha Renamed"
         in text
     )
+
+    assert second[
+        "written_count"
+    ] == 1
+
+    assert second[
+        "pruned_count"
+    ] == 1
 
 
 def test_prune_deletes_only_stale_managed_notes(

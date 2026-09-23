@@ -252,7 +252,7 @@ def test_manifest_is_deterministic_and_writes_nothing(
         entry["relative_path"]
         == (
             "Entities/system/"
-            f"{ENTITY_A}.md"
+            "Test System Alpha.md"
         )
     )
 
@@ -543,6 +543,116 @@ def test_manifest_includes_navigation_plan_without_writes(
     assert first[
         "vault_writes_performed"
     ] is False
+
+    assert list(
+        tmp_path.iterdir()
+    ) == []
+
+
+def test_manifest_rejects_human_path_collision(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    first_id = (
+        "11111111-1111-4111-8111-111111111111"
+    )
+
+    second_id = (
+        "22222222-2222-4222-8222-222222222222"
+    )
+
+    selection = {
+        "total_count": 2,
+        "selected_count": 2,
+        "entities": [
+            {
+                "entity_id": first_id,
+                "entity_type": "task",
+                "canonical_name": "Plan: A",
+                "status": "active",
+            },
+            {
+                "entity_id": second_id,
+                "entity_type": "task",
+                "canonical_name": "Plan/A",
+                "status": "active",
+            },
+        ],
+    }
+
+    snapshots = {
+        first_id: {
+            "entity": {
+                "entity_id": first_id,
+                "entity_type": "task",
+                "canonical_name": "Plan: A",
+                "status": "active",
+            },
+            "claims": [],
+            "outgoing_relations": [],
+            "incoming_relations": [],
+            "events": [],
+            "dated_claims": [],
+        },
+        second_id: {
+            "entity": {
+                "entity_id": second_id,
+                "entity_type": "task",
+                "canonical_name": "Plan/A",
+                "status": "active",
+            },
+            "claims": [],
+            "outgoing_relations": [],
+            "incoming_relations": [],
+            "events": [],
+            "dated_claims": [],
+        },
+    }
+
+    zero_counts = {
+        "ordinary_claim_count": 0,
+        "outgoing_relation_count": 0,
+        "incoming_relation_count": 0,
+        "event_count": 0,
+        "dated_claim_count": 0,
+    }
+
+    monkeypatch.setattr(
+        export,
+        "_list_entities",
+        lambda **_kwargs: selection,
+    )
+
+    monkeypatch.setattr(
+        export,
+        "_load_entity_snapshot",
+        lambda entity_id, **_kwargs: (
+            snapshots[entity_id]
+        ),
+    )
+
+    monkeypatch.setattr(
+        export,
+        "_projection_counts",
+        lambda _entity_id: dict(
+            zero_counts
+        ),
+    )
+
+    monkeypatch.setattr(
+        export,
+        "normalize_service_snapshot",
+        lambda raw: raw,
+    )
+
+    with pytest.raises(
+        ObsidianExportError,
+        match="Projection path collision",
+    ):
+        export.build_projection_manifest(
+            limit=100,
+            vault_root=tmp_path,
+        )
 
     assert list(
         tmp_path.iterdir()
