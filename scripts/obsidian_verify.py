@@ -397,7 +397,7 @@ def temp_verify() -> None:
 
         manifest = (
             build_projection_manifest(
-                limit=100,
+                limit=None,
                 vault_root=vault,
             )
         )
@@ -602,7 +602,7 @@ def real_readonly(
 
     manifest = (
         build_projection_manifest(
-            limit=100,
+            limit=None,
             vault_root=vault,
         )
     )

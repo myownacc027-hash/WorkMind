@@ -641,7 +641,7 @@ def _preflight_vault(
 
 def apply_projection(
     *,
-    limit: int = 100,
+    limit: int | None = None,
     status: str | None = None,
     include_excerpt: bool = False,
     vault_root: str | Path | None = None,
@@ -669,8 +669,14 @@ def apply_projection(
             "Use dry-run for status-filtered views."
         )
 
+    if limit is not None:
+        raise ObsidianExportError(
+            "Refusing to apply a limited projection. "
+            "Use dry-run for limited previews."
+        )
+
     manifest = build_projection_manifest(
-        limit=limit,
+        limit=None,
         status=None,
         include_excerpt=include_excerpt,
         vault_root=vault_root,
@@ -681,7 +687,7 @@ def apply_projection(
     ):
         raise ObsidianExportError(
             "Refusing to apply incomplete projection. "
-            "Increase limit until selection_complete=true."
+            "Full writable projection must be complete."
         )
 
     root = Path(

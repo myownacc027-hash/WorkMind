@@ -83,11 +83,16 @@ def dry_run(
 
 @app.command("apply")
 def apply_command(
-    limit: int = typer.Option(
-        100,
+    limit: int | None = typer.Option(
+        None,
         "--limit",
         min=1,
         max=1000,
+        hidden=True,
+        help=(
+            "Deprecated for apply. Full writable projection "
+            "is always unbounded."
+        ),
     ),
     entity_status: str | None = typer.Option(
         None,

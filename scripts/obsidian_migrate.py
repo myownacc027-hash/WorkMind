@@ -192,7 +192,7 @@ def managed_paths(
 
 def verify_manifest() -> dict:
     manifest = build_projection_manifest(
-        limit=100,
+        limit=None,
         vault_root=VAULT,
     )
 

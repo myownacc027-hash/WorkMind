@@ -310,17 +310,32 @@ def _assert_complete_service_snapshot(
         )
 
 
+
 def _list_entities(
     *,
-    limit: int = 100,
+    limit: int | None = 100,
     status: str | None = None,
 ) -> dict[str, Any]:
-    safe_limit = max(
-        1,
-        min(
-            int(limit),
-            1000,
-        ),
+    """
+    List entities for an Obsidian projection.
+
+    Numeric limits are intended for read-only preview manifests and remain
+    capped at 1000 rows.
+
+    limit=None means a complete projection and intentionally applies no SQL
+    row limit. Writable projection uses this mode.
+    """
+
+    safe_limit = (
+        None
+        if limit is None
+        else max(
+            1,
+            min(
+                int(limit),
+                1000,
+            ),
+        )
     )
 
     clean_status = (
@@ -359,15 +374,24 @@ def _list_entities(
             count_statement,
         )
 
+        entity_statement = (
+            entity_statement.order_by(
+                KnowledgeEntity.entity_type,
+                KnowledgeEntity.canonical_name,
+                KnowledgeEntity.id,
+            )
+        )
+
+        if safe_limit is not None:
+            entity_statement = (
+                entity_statement.limit(
+                    safe_limit
+                )
+            )
+
         rows = list(
             session.scalars(
                 entity_statement
-                .order_by(
-                    KnowledgeEntity.entity_type,
-                    KnowledgeEntity.canonical_name,
-                    KnowledgeEntity.id,
-                )
-                .limit(safe_limit)
             )
         )
 
@@ -411,7 +435,7 @@ def _sha256_text(value: str) -> str:
 
 def build_projection_manifest(
     *,
-    limit: int = 100,
+    limit: int | None = 100,
     status: str | None = None,
     include_excerpt: bool = False,
     vault_root: str | Path | None = None,
