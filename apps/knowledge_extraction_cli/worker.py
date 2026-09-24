@@ -16,6 +16,7 @@ from packages.knowledge.extraction import (
     claim_extraction_jobs,
     validate_extraction_job,
 )
+from packages.knowledge.deepseek_provider import extract_with_deepseek
 from packages.knowledge.openai_provider import extract_with_openai
 
 app = typer.Typer(add_completion=False, invoke_without_command=True)
@@ -63,13 +64,14 @@ def run(
 ) -> None:
     settings = get_settings()
     provider = settings.knowledge_extraction_provider.strip().lower()
-    if provider != "openai":
+    if provider not in {"openai", "deepseek"}:
         result = {
             "status": "skipped",
             "provider": provider,
             "reason": (
-                "Background worker currently supports provider=openai. "
-                "provider=agent is processed through WorkMind MCP tools."
+                "Background worker supports provider=openai and "
+                "provider=deepseek. provider=agent is processed through "
+                "WorkMind MCP tools."
             ),
         }
         _write_status(result)
@@ -96,7 +98,12 @@ def run(
     for claimed in jobs:
         try:
             packet = build_extraction_packet(claimed.id)
-            bundle_json, provider_response = extract_with_openai(
+            extractor = (
+                extract_with_deepseek
+                if provider == "deepseek"
+                else extract_with_openai
+            )
+            bundle_json, provider_response = extractor(
                 packet,
                 settings=settings,
             )
@@ -134,7 +141,11 @@ def run(
     result = {
         "status": "completed_with_errors" if counters["failed"] else "completed",
         "provider": provider,
-        "model": settings.knowledge_extraction_model,
+        "model": (
+            settings.deepseek_model
+            if provider == "deepseek"
+            else settings.knowledge_extraction_model
+        ),
         "auto_apply": apply_flag,
         "started_at": started.isoformat(),
         "finished_at": datetime.now(UTC).isoformat(),

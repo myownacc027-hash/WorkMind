@@ -336,6 +336,34 @@ class Settings(BaseSettings):
         le=1800.0,
         validation_alias="KNOWLEDGE_EXTRACTION_TIMEOUT_SECONDS",
     )
+    deepseek_api_key: str = Field(
+        default="",
+        validation_alias="DEEPSEEK_API_KEY",
+    )
+    deepseek_base_url: str = Field(
+        default="https://api.deepseek.com",
+        validation_alias="DEEPSEEK_BASE_URL",
+    )
+    deepseek_model: str = Field(
+        default="deepseek-flash",
+        validation_alias="DEEPSEEK_MODEL",
+    )
+    deepseek_reasoning_effort: str = Field(
+        default="none",
+        validation_alias="DEEPSEEK_REASONING_EFFORT",
+    )
+    deepseek_max_output_tokens: int = Field(
+        default=16_384,
+        ge=256,
+        le=393_216,
+        validation_alias="DEEPSEEK_MAX_OUTPUT_TOKENS",
+    )
+    deepseek_timeout_seconds: float = Field(
+        default=120.0,
+        ge=10.0,
+        le=1800.0,
+        validation_alias="DEEPSEEK_TIMEOUT_SECONDS",
+    )
 
     log_level: str = "INFO"
 

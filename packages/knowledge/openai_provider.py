@@ -6,6 +6,7 @@ import urllib.request
 from typing import Any
 
 from packages.common.config import Settings
+from packages.knowledge.extraction_schema import BUNDLE_SCHEMA
 from packages.security.redaction import redact_data, redact_text
 
 
@@ -13,17 +14,9 @@ class KnowledgeProviderError(RuntimeError):
     """Raised when the configured model provider cannot return a bundle."""
 
 
-_BUNDLE_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "entities": {"type": "array", "items": {"type": "object"}},
-        "claims": {"type": "array", "items": {"type": "object"}},
-        "relations": {"type": "array", "items": {"type": "object"}},
-        "events": {"type": "array", "items": {"type": "object"}},
-    },
-    "required": ["entities", "claims", "relations", "events"],
-}
+# Compatibility alias for existing tests/callers.
+# The canonical provider-independent contract lives in extraction_schema.py.
+_BUNDLE_SCHEMA = BUNDLE_SCHEMA
 
 
 def _output_text(response: dict[str, Any]) -> str:

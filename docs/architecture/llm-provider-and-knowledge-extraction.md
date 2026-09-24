@@ -1,5 +1,7 @@
 # LLM Provider and Knowledge Extraction Architecture
 
+> System-wide architecture: [docs/architecture.md](../architecture.md). This file is the detailed specification for the knowledge extraction subsystem. If a cross-cutting architectural statement conflicts with this document, `docs/architecture.md` takes precedence.
+
 ## Status and scope
 
 This document records the WorkMind 0.12.0 extraction architecture. It separates
@@ -7,8 +9,7 @@ features implemented in 0.12.0 from future provider work.
 
 ## Implemented in 0.12.0
 
-The active provider is `agent`: Codex obtains leased jobs and submits proposed
-JSON bundles through WorkMind MCP. `auto_apply` remains `false`.
+Provider routing is pluggable. `agent` is processed through WorkMind MCP, while the background extraction worker supports configured remote providers `openai` and `deepseek`. `auto_apply` remains `false`.
 
 The extractor contract is `wm-ke-v2`. Existing `wm-ke-v1` jobs remain valid and
 receive `packet_contract_version=wm-ke-v2` from the current safe packet builder
@@ -181,13 +182,59 @@ UTF-8-safe file validation, encoding-loss detection, exact entity ID reuse,
 claim ID/key validation, event ID reuse, temporal supersession, evidence scope,
 safe apply failure/requeue, and `auto_apply=false`.
 
+## Current provider status
+
+The extraction architecture now has three provider routes:
+
+- `agent` — candidate bundles are submitted through WorkMind MCP;
+- `openai` — remote background worker provider;
+- `deepseek` — remote background worker provider.
+
+All provider routes reuse the same WorkMind extraction pipeline:
+
+~~~text
+wm-ke-v2 packet
+    |
+    v
+provider
+    |
+    v
+candidate bundle
+    |
+    v
+canonical schema
+    |
+    v
+WorkMind semantic / evidence / identity validation
+    |
+    v
+validated job
+    |
+    v
+controlled apply
+~~~
+
+The provider-independent canonical schema is defined separately from any
+specific provider implementation.
+
+A provider may perform only semantics-preserving structural normalization
+before canonical schema validation. Current examples include filling an absent
+recognized top-level bundle section with an empty array and dropping an
+unsupported event-level `confidence` field that is not part of the durable
+WorkMind event model.
+
+Provider output remains untrusted candidate data. Neither OpenAI nor DeepSeek
+may directly mutate PostgreSQL, Qdrant, Obsidian, or the durable knowledge
+graph.
+
+`validated` and `applied` remain distinct states.
+
 ## Planned and future
 
 Later phases may add:
 
 - a local model provider;
-- OpenAI or another online provider;
-- an OpenAI-compatible provider;
+- additional provider adapters beyond the current `agent`, `openai`, and `deepseek` routes;
 - hybrid local-first extraction with a controlled remote fallback.
 
 Local model integration is explicitly out of scope for WorkMind 0.12.0. Every

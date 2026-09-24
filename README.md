@@ -157,3 +157,10 @@ WorkMind находится в активной разработке. Baseline `
 **Source of truth: PostgreSQL + CAS.** Qdrant — производный индекс, перестраивается из source of truth.
 
 > **Важно:** backup на том же диске `C:` — это локальная recovery-копия, не защита от физического отказа диска.
+
+## Architecture
+
+Актуальная техническая документация WorkMind:
+
+- [Архитектура WorkMind](docs/architecture.md)
+- [Документация проекта](docs/README.md)
