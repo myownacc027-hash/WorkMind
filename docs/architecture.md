@@ -2,7 +2,7 @@
 
 **Статус:** Current
 **Редакция:** v2
-**Дата актуализации:** 2026-09-24
+**Дата актуализации:** 2026-09-25
 
 ## 1. Назначение
 
@@ -701,6 +701,199 @@ Bitrix24
                                PostgreSQL
 ~~~
 
+### 12.4. B24 Source Contract v1
+
+Подробная спецификация:
+
+- [Bitrix24 Source Contract v1](sources/bitrix24.md);
+- [Bitrix24 XLSX Field Mapping](sources/bitrix24-field-mapping.md);
+- [ADR-006: Bitrix24 source identity and snapshot semantics](adr/006-bitrix24-source-identity-and-snapshot-semantics.md).
+
+Logical source identity задачи:
+
+~~~text
+source_type = b24_task
+external_id = <Bitrix24 Task ID>
+~~~
+
+`external_id` хранится как строковый идентификатор, даже если XLSX представляет
+ID как числовую Excel-ячейку.
+
+Оба транспорта:
+
+~~~text
+XLSX
+ScraplingB24MI
+~~~
+
+должны приводить данные к одному normalized `B24Task`.
+
+Source representation разделяется на:
+
+~~~text
+raw source
+normalized source
+semantic extraction input
+~~~
+
+Для этого используются три независимых fingerprint:
+
+~~~text
+raw_hash
+canonical_hash
+extraction_input_hash
+~~~
+
+`raw_hash` изменяется при изменении полного transport-level представления,
+включая неизвестные поля и hyperlinks.
+
+`canonical_hash` отражает изменение нормализованного B24Task.
+
+`extraction_input_hash` отражает только данные, влияющие на semantic extraction.
+Изменение производных полей вроде количества дней с даты постановки не должно
+само по себе запускать повторный LLM extraction.
+
+### 12.5. B24 participant identity
+
+Поля:
+
+- Постановщик;
+- Исполнитель;
+- Соисполнители;
+- Наблюдатели;
+- Дополнительные сотрудники
+
+из XLSX являются authoritative source labels, но не authoritative Person identity.
+
+Одинаковый сотрудник может быть представлен различным порядком ФИО, а некоторые
+значения могут обозначать роль или техническую очередь, а не человека.
+
+Поэтому XLSX importer сохраняет labels, но не создаёт автоматически новые
+`Person` entities только на основании строки имени.
+
+Strong person identity возникает при наличии:
+
+- стабильного Bitrix24 user ID;
+- другого системного identifier;
+- подтверждённого local identity mapping.
+
+### 12.6. B24 parent references
+
+`ID базовой задачи` является strong external task reference.
+
+Parent task не обязана присутствовать в текущем snapshot.
+
+Importer сохраняет:
+
+~~~text
+parent_external_id
+parent_title_snapshot
+parent_stage_snapshot
+~~~
+
+даже если parent source object ещё не импортирован.
+
+Отсутствующий parent не должен заменяться выдуманной полной Task entity.
+Unresolved external reference разрешается позже, когда соответствующий source
+object станет доступен.
+
+### 12.7. B24 snapshot semantics
+
+B24 XLSX export может быть частичным.
+
+Правила:
+
+~~~text
+task present + field present + value present
+    -> update source field
+
+task present + field present + empty cell
+    -> source field becomes NULL
+
+task present + column absent from export
+    -> previous source field is not cleared
+
+task absent from snapshot
+    -> no deletion
+~~~
+
+Отсутствие задачи из очередного XLSX не является доказательством её удаления,
+закрытия или недоступности в Bitrix24.
+
+Transport должен хранить список реально присутствовавших колонок snapshot.
+
+### 12.8. B24 timezone semantics
+
+XLSX содержит naive local datetimes без timezone offset.
+
+Importer не должен считать их UTC.
+
+Каждый B24 source/import configuration должен иметь явный:
+
+~~~text
+source_timezone
+~~~
+
+После этого source-local datetime преобразуется в canonical timezone
+PostgreSQL.
+
+### 12.9. B24 hyperlinks
+
+Hyperlinks являются частью raw source.
+
+Task hyperlink может содержать одновременно:
+
+- Bitrix24 Task ID;
+- Bitrix24 workgroup/project ID;
+- source URL.
+
+Если project/group ID доступен из URL, он хранится отдельно как
+`project_external_id`.
+
+Название проекта хранится отдельно как `project_name` и не используется как
+единственный project identity.
+
+### 12.10. Structured facts and LLM boundary
+
+Структурированные B24 fields применяются детерминированно.
+
+LLM не используется для повторного угадывания:
+
+- Task ID;
+- title;
+- status;
+- stage;
+- deadline;
+- project;
+- product;
+- request type;
+- parent task;
+- других authoritative structured fields.
+
+Semantic extraction получает прежде всего:
+
+~~~text
+Task ID
+Title
+Description
+selected structured context
+~~~
+
+и используется для определения:
+
+- проблемы;
+- цели;
+- требований;
+- ограничений;
+- причин;
+- решений;
+- критериев;
+- затронутых процессов;
+- дополнительных semantic relations.
+
+Provider output остаётся candidate knowledge и проходит обычный WorkMind
+validation pipeline.
+
 ---
 
 ## 13. Obsidian Projection
@@ -887,6 +1080,7 @@ object deleted from source system
 3. Bitrix24 является optional source module.
 4. LLM генерирует candidate bundle; WorkMind validator определяет допустимость.
 5. Structured source authority имеет приоритет над LLM extraction.
+6. Bitrix24 Task ID определяет source identity, а partial snapshot не является сигналом удаления.
 
 ---
 

@@ -6,6 +6,7 @@
 
 - [Архитектура WorkMind](architecture.md)
 - [Bitrix24 как источник данных](sources/bitrix24.md)
+- [Bitrix24 XLSX Field Mapping](sources/bitrix24-field-mapping.md)
 - [Obsidian Projection](projection/obsidian.md)
 - [LLM Provider and Knowledge Extraction](architecture/llm-provider-and-knowledge-extraction.md)
 
@@ -16,6 +17,7 @@
 - [ADR-003: Bitrix24 — optional source module](adr/003-bitrix24-optional-source-module.md)
 - [ADR-004: LLM создаёт candidate bundle](adr/004-llm-candidate-validation.md)
 - [ADR-005: Structured source authority](adr/005-structured-source-authority.md)
+- [ADR-006: Bitrix24 source identity and snapshot semantics](adr/006-bitrix24-source-identity-and-snapshot-semantics.md)
 
 ## Правило актуальности
 
