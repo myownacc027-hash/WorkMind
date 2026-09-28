@@ -1059,6 +1059,18 @@ class B24Task(Base):
         default=dict,
     )
 
+    canonical_json: Mapped[dict] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+    )
+
+    extraction_input_json: Mapped[dict] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+    )
+
     raw_hash: Mapped[str] = mapped_column(
         sa.String(64),
         nullable=False,

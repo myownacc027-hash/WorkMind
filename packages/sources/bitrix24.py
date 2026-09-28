@@ -442,7 +442,7 @@ def _json_safe(value: Any) -> Any:
     return value
 
 
-def _stable_hash(value: Any) -> str:
+def stable_payload_hash(value: Any) -> str:
     payload = json.dumps(
         _json_safe(value),
         ensure_ascii=False,
@@ -454,6 +454,22 @@ def _stable_hash(value: Any) -> str:
     return hashlib.sha256(
         payload
     ).hexdigest()
+
+
+def _stable_hash(value: Any) -> str:
+    return stable_payload_hash(
+        value
+    )
+
+
+def build_extraction_input(
+    canonical_json: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        key: canonical_json.get(key)
+        for key in EXTRACTION_INPUT_FIELDS
+        if key in canonical_json
+    }
 
 
 def _file_hash(path: Path) -> str:
@@ -1041,11 +1057,9 @@ def _normalize_task(
         canonical
     )
 
-    extraction_input = {
-        key: canonical_json.get(key)
-        for key in EXTRACTION_INPUT_FIELDS
-        if key in canonical_json
-    }
+    extraction_input = build_extraction_input(
+        canonical_json
+    )
 
     raw_payload = {
         "present_columns": list(

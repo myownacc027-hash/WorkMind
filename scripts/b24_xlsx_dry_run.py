@@ -359,7 +359,7 @@ def main() -> int:
     print("remote_api_calls=false")
     print("knowledge_apply=false")
     print(
-        "RESULT=WORKMIND_02D14D_R1_B24_XLSX_DRY_RUN_COMPLETE"
+        "RESULT=WORKMIND_B24_XLSX_DRY_RUN_COMPLETE"
     )
 
     return 0

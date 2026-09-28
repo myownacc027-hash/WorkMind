@@ -917,6 +917,26 @@ Bitrix24 Task ID.
 - present columns;
 - row/task counters.
 
+`b24_tasks` also stores materialized `canonical_json` and
+`extraction_input_json`.
+
+These JSON objects are the current merged source state. They are required for
+partial snapshots:
+
+~~~text
+incoming column absent
+    -> keep previous canonical key
+
+incoming column present and empty
+    -> overwrite canonical key with NULL
+~~~
+
+The current `canonical_hash` and `extraction_input_hash` are recalculated from
+this merged materialized state.
+
+The immutable observation keeps the exact payload of the individual snapshot;
+it is never replaced by the merged current state.
+
 `b24_task_observations` is append-oriented audit history. Each observation
 preserves:
 

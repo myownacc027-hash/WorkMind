@@ -1027,3 +1027,82 @@ description change
 
 This behavior is verified before B24 data is connected to PostgreSQL
 persistence or the WorkMind extraction queue.
+
+## 29. Persistence merge and idempotency semantics
+
+`b24_tasks` contains both query-oriented columns and two materialized JSON
+objects:
+
+~~~text
+canonical_json
+extraction_input_json
+~~~
+
+These represent the current merged logical source state.
+
+For a later partial snapshot:
+
+~~~text
+key absent from incoming canonical_json
+    -> preserve previous current-state key
+
+key present with NULL
+    -> current-state key becomes NULL
+~~~
+
+After merge:
+
+~~~text
+canonical_hash =
+    SHA-256(materialized canonical_json)
+
+extraction_input_json =
+    build extraction input from materialized canonical_json
+
+extraction_input_hash =
+    SHA-256(materialized extraction_input_json)
+~~~
+
+By contrast, each `b24_task_observations` row stores the exact canonical and
+extraction payload produced from that individual source observation.
+
+### Binary snapshot idempotency
+
+For XLSX transport the binary file SHA-256 is the snapshot source hash.
+
+The pair:
+
+~~~text
+transport
+source_hash
+~~~
+
+is unique.
+
+Re-importing the exact same XLSX therefore performs no source mutation and
+creates:
+
+~~~text
+0 new snapshots
+0 new tasks
+0 new observations
+~~~
+
+A different XLSX binary is a new snapshot even when it contains the same Task
+IDs.
+
+### Import transaction boundary
+
+One snapshot import is one database transaction.
+
+If persistence of any task or observation fails, the caller rolls back the
+whole snapshot.
+
+No B24 import operation in this stage writes:
+
+- DocumentChunk;
+- Qdrant;
+- KnowledgeExtractionJob;
+- KnowledgeEntity;
+- KnowledgeClaim;
+- Obsidian.

@@ -109,6 +109,8 @@ def upgrade() -> None:
         _json_array_column("present_columns"),
         _json_object_column("raw_row"),
         _json_object_column("raw_hyperlinks"),
+        _json_object_column("canonical_json"),
+        _json_object_column("extraction_input_json"),
         sa.Column("raw_hash", sa.String(64), nullable=False),
         sa.Column("canonical_hash", sa.String(64), nullable=False),
         sa.Column("extraction_input_hash", sa.String(64), nullable=False),
