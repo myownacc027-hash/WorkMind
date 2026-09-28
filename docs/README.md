@@ -18,6 +18,7 @@
 - [ADR-004: LLM создаёт candidate bundle](adr/004-llm-candidate-validation.md)
 - [ADR-005: Structured source authority](adr/005-structured-source-authority.md)
 - [ADR-006: Bitrix24 source identity and snapshot semantics](adr/006-bitrix24-source-identity-and-snapshot-semantics.md)
+- [ADR-007: Bitrix24 knowledge identity and provenance](adr/007-bitrix24-knowledge-identity-and-provenance.md)
 
 ## Правило актуальности
 

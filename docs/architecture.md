@@ -978,6 +978,50 @@ The exact `DocumentChunk` / Qdrant integration is deliberately not part of
 migration `0012_bitrix24_sources`. It is implemented only after source
 persistence and normalization are verified.
 
+### 12.13. Deterministic B24 knowledge projection
+
+B24 source persistence and B24 knowledge projection are separate layers.
+
+The deterministic knowledge projection produces a plan from:
+
+~~~text
+B24Task current state
++
+latest immutable B24TaskObservation
++
+existing KnowledgeEntity identity
+~~~
+
+B24 task identity uses:
+
+~~~text
+entity_type = task
+external_id = <Bitrix24 Task ID>
+attributes.b24.source_namespace = b24_task
+attributes.b24.task_id = <Bitrix24 Task ID>
+~~~
+
+Existing legacy B24 task entities may be matched by exact Task ID.
+
+The projection does not fuzzy-merge tasks by title.
+
+The human canonical name removes only the known leading `[ЗнИ]:` classifier;
+the exact source title remains in `attributes.b24.source_title`.
+
+Participant strings remain labels and never create Person entities merely
+because a name is present in the XLSX.
+
+Historical provenance is based on the immutable observation:
+
+~~~text
+workmind://b24_observation/<UUID>
+~~~
+
+Missing parents remain unresolved external references.
+
+Before any Knowledge write, WorkMind must produce a full read-only projection
+plan and verify identity collisions.
+
 ---
 
 ## 13. Obsidian Projection

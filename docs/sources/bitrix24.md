@@ -1106,3 +1106,89 @@ No B24 import operation in this stage writes:
 - KnowledgeEntity;
 - KnowledgeClaim;
 - Obsidian.
+
+## 30. Deterministic Knowledge projection
+
+B24 knowledge projection is source-driven and does not require an LLM.
+
+Each current B24 task produces a deterministic task-entity candidate.
+
+### Identity
+
+The knowledge entity keeps the raw Bitrix24 Task ID in `external_id` for
+compatibility with existing WorkMind task entities.
+
+Source namespace identity is additionally stored in:
+
+~~~text
+attributes.b24.source_namespace = b24_task
+attributes.b24.task_id
+~~~
+
+The projection must never automatically merge different task entities merely
+because their titles are similar.
+
+### Human-facing title
+
+A known leading `[ЗнИ]:` classifier may be removed from the human-facing
+canonical name.
+
+The original source title remains unchanged in:
+
+~~~text
+attributes.b24.source_title
+~~~
+
+### Structured attributes
+
+Current authoritative B24 fields are projected under the `b24` attributes
+namespace.
+
+Existing non-B24 attributes on a KnowledgeEntity are preserved.
+
+### Description
+
+The current B24 task description is treated as authoritative source content for
+the deterministic entity description.
+
+This does not make semantic conclusions extracted from that description
+authoritative.
+
+### Participants
+
+Human-readable participant values remain labels only.
+
+No Person entity is created without stable identity evidence.
+
+### Provenance
+
+The deterministic projection uses the latest immutable task observation as its
+evidence candidate.
+
+~~~text
+source_type = b24_observation
+source_ref = workmind://b24_observation/<UUID>
+~~~
+
+### Parent references
+
+A parent relation is only a candidate when the referenced parent Task ID exists
+in the B24 source layer.
+
+Otherwise the parent remains an unresolved external reference.
+
+### Safety boundary
+
+The projection planning command is read-only.
+
+It does not create:
+
+- KnowledgeEntity;
+- KnowledgeClaim;
+- KnowledgeEvidence;
+- DocumentChunk;
+- Qdrant points;
+- extraction jobs;
+- Obsidian files.
+
+Applying the verified plan is a separate explicit stage.
