@@ -959,3 +959,71 @@ version fingerprint.
 
 `raw_hash` and `canonical_hash` must not by themselves trigger another LLM
 extraction.
+
+## 28. XLSX parser and normalizer invariants
+
+The first B24 transport implementation is a read-only XLSX parser.
+
+Before persistence, the parser verifies the source snapshot and produces a
+normalized in-memory representation.
+
+The parser:
+
+- preserves every present XLSX column in `raw_row`;
+- preserves hyperlinks separately in `raw_hyperlinks`;
+- rejects duplicate headers;
+- requires Task ID for a row to become a B24 task;
+- skips summary/non-task rows without Task ID;
+- rejects fractional Task IDs;
+- preserves unresolved parent references;
+- validates task IDs embedded in hyperlinks;
+- extracts workgroup/project ID from task hyperlinks;
+- converts naive datetimes through explicit `source_timezone`;
+- supports `Europe/Moscow` on Windows even when the system tzdata package is
+  unavailable;
+- treats duration fields as elapsed durations;
+- supports durations greater than 24 hours;
+- splits participant lists used by the audited B24 XLSX on comma, semicolon or
+  newline boundaries;
+- preserves participant values only as labels;
+- performs no database writes during dry-run.
+
+Audit description-length metrics use the raw XLSX cell text. Normalized
+description-length metrics are reported separately because normalization trims
+surrounding whitespace, including non-breaking spaces.
+
+### Fingerprint boundaries
+
+`raw_hash` includes:
+
+~~~text
+present_columns
+raw_row
+raw_hyperlinks
+~~~
+
+`canonical_hash` contains normalized source state.
+
+`extraction_input_hash` contains only semantic extraction input.
+
+Consequently:
+
+~~~text
+derived counter change
+    -> raw_hash changes
+    -> canonical_hash unchanged
+    -> extraction_input_hash unchanged
+
+status change
+    -> raw_hash changes
+    -> canonical_hash changes
+    -> extraction_input_hash unchanged
+
+description change
+    -> raw_hash changes
+    -> canonical_hash changes
+    -> extraction_input_hash changes
+~~~
+
+This behavior is verified before B24 data is connected to PostgreSQL
+persistence or the WorkMind extraction queue.
