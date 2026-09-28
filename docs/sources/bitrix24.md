@@ -852,3 +852,110 @@ idempotent persistence
 ~~~
 
 Importer не должен начинаться с LLM prompt или Obsidian rendering.
+
+## 26. Persistence model
+
+The first persistence implementation uses three tables.
+
+### `b24_import_snapshots`
+
+One row describes one transport-level import attempt/snapshot.
+
+It stores:
+
+- transport;
+- source name/hash when available;
+- source timezone;
+- present columns;
+- import counters;
+- transport metadata.
+
+A snapshot is not interpreted as a complete inventory of Bitrix24 tasks.
+
+### `b24_tasks`
+
+One row represents the current normalized state of one logical Bitrix24 task.
+
+Stable identity remains:
+
+~~~text
+source_type = b24_task
+external_id = <Bitrix24 Task ID>
+~~~
+
+The row contains:
+
+- current canonical fields;
+- current raw row and hyperlinks;
+- the three fingerprints;
+- last snapshot reference.
+
+This table is optimized for current-state reads.
+
+### `b24_task_observations`
+
+An observation records what WorkMind actually received and normalized in a
+specific snapshot.
+
+It preserves:
+
+~~~text
+raw_row
+raw_hyperlinks
+present_columns
+canonical_json
+extraction_input_json
+raw_hash
+canonical_hash
+extraction_input_hash
+contract_version
+normalizer_version
+~~~
+
+Observations are historical audit records and must not be rewritten to look
+like a newer source state.
+
+### Why current state and observations are separate
+
+Bitrix24 tasks are mutable.
+
+A task can change status, description, deadline, participants, product, parent
+or other fields while keeping the same Task ID.
+
+WorkMind therefore needs both:
+
+~~~text
+current state
++
+historical source observation
+~~~
+
+Using only `b24_tasks` would lose historical provenance.
+
+Using only immutable observations would make current-state access and
+idempotent synchronization unnecessarily expensive.
+
+## 27. Evidence versioning constraint
+
+Existing WorkMind extraction is based on `DocumentChunk` evidence.
+
+For mutable B24 tasks, a historical claim must never silently start pointing
+to newer text after the task changes.
+
+Therefore semantic extraction integration must preserve this invariant:
+
+~~~text
+evidence source version is immutable
+~~~
+
+Migration `0012_bitrix24_sources` does not yet connect B24 tasks to
+`DocumentChunk`, Qdrant, or `KnowledgeExtractionJob`.
+
+That wiring is intentionally deferred until the XLSX normalizer and
+observation persistence are verified.
+
+When extraction is connected, `extraction_input_hash` is the B24 semantic
+version fingerprint.
+
+`raw_hash` and `canonical_hash` must not by themselves trigger another LLM
+extraction.

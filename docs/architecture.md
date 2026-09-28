@@ -894,6 +894,70 @@ selected structured context
 Provider output остаётся candidate knowledge и проходит обычный WorkMind
 validation pipeline.
 
+### 12.11. B24 persistence model
+
+The persistence layer is intentionally separate from `ExternalDocument`.
+
+~~~text
+b24_import_snapshots
+        |
+        +---- b24_tasks
+        |
+        +---- b24_task_observations
+~~~
+
+`b24_tasks` stores the current normalized source state for each stable
+Bitrix24 Task ID.
+
+`b24_import_snapshots` stores transport-level import metadata such as:
+
+- transport;
+- source file/hash when available;
+- source timezone;
+- present columns;
+- row/task counters.
+
+`b24_task_observations` is append-oriented audit history. Each observation
+preserves:
+
+- raw row;
+- raw hyperlinks;
+- normalized canonical JSON;
+- semantic extraction input JSON;
+- raw hash;
+- canonical hash;
+- extraction input hash;
+- contract and normalizer versions.
+
+The current task row may change. An observation must not be rewritten to
+represent a newer source state.
+
+This distinction is required because Bitrix24 is a mutable source while
+knowledge evidence must remain attributable to the source version from which
+it was produced.
+
+### 12.12. Mutable-source evidence invariant
+
+B24 integration must not overwrite historical evidence merely because the
+current task changed.
+
+The storage layer therefore distinguishes:
+
+~~~text
+stable logical task identity
+        |
+        +--> current canonical state
+        |
+        +--> immutable observations
+~~~
+
+Future semantic extraction must bind its evidence to a stable observation or
+equivalent immutable source version.
+
+The exact `DocumentChunk` / Qdrant integration is deliberately not part of
+migration `0012_bitrix24_sources`. It is implemented only after source
+persistence and normalization are verified.
+
 ---
 
 ## 13. Obsidian Projection
