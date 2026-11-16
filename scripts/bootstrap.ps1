@@ -12,10 +12,19 @@ function Stop-WithMessage {
     exit 1
 }
 
+function Assert-NativeSuccess {
+    param([string]$CommandName)
+    if ($LASTEXITCODE -ne 0) {
+        Stop-WithMessage "$CommandName failed with exit code $LASTEXITCODE."
+    }
+}
+
 # WorkMind supports Python 3.11-3.13.
 try {
     $pythonVersion = python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"
+    Assert-NativeSuccess "Python version check"
     $pythonSupported = python -c "import sys; print('yes' if (3, 11) <= sys.version_info[:2] < (3, 14) else 'no')"
+    Assert-NativeSuccess "Python compatibility check"
 } catch {
     Stop-WithMessage "Python was not found. Install Python 3.11, 3.12, or 3.13 and reopen PowerShell."
 }
@@ -32,11 +41,14 @@ if (-not (Test-Path ".env")) {
 
 if (-not (Test-Path ".venv\Scripts\python.exe")) {
     python -m venv .venv
+    Assert-NativeSuccess "Python virtual environment creation"
 }
 
 & .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
+Assert-NativeSuccess "pip upgrade"
 python -m pip install -e ".[windows,embeddings,dev]"
+Assert-NativeSuccess "WorkMind dependency installation"
 
 if ($SkipDocker) {
     Write-Host "Python environment completed. Docker startup and database migration were skipped." -ForegroundColor Yellow
@@ -54,6 +66,9 @@ if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
 
 try {
     docker info *> $null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Docker engine is unavailable."
+    }
 } catch {
     Write-Host ""
     Write-Host "Docker Desktop is installed but its engine is not running." -ForegroundColor Yellow
@@ -62,9 +77,11 @@ try {
 }
 
 docker compose up -d
+Assert-NativeSuccess "docker compose up"
 python -m alembic upgrade head
+Assert-NativeSuccess "Alembic migration"
 
 Write-Host ""
 Write-Host "WorkMind bootstrap completed." -ForegroundColor Green
 Write-Host "Start classic Outlook, wait for folder synchronization, then run:"
-Write-Host "  workmind-outlook sync --lookback-days 7 --max-per-folder 50" -ForegroundColor Cyan
+Write-Host "  workmind-outlook --lookback-days 7 --max-per-folder 50" -ForegroundColor Cyan
