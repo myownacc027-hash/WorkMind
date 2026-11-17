@@ -69,7 +69,7 @@ class Settings(BaseSettings):
     )
     attachment_supported_extensions_csv: str = Field(
         default=(
-            ".pdf,.docx,.xlsx,.xlsm,.pptx,.txt,.md,.csv,.json,"
+            ".pdf,.docx,.xlsx,.xlsm,.xls,.vsdx,.pptx,.txt,.md,.csv,.json,"
             ".xml,.html,.htm,.log"
         ),
         validation_alias="ATTACHMENT_SUPPORTED_EXTENSIONS",
@@ -86,7 +86,7 @@ class Settings(BaseSettings):
     )
     document_supported_extensions_csv: str = Field(
         default=(
-            ".pdf,.docx,.xlsx,.xlsm,.pptx,.txt,.md,.csv,.json,"
+            ".pdf,.docx,.xlsx,.xlsm,.xls,.vsdx,.pptx,.txt,.md,.csv,.json,"
             ".xml,.html,.htm,.log"
         ),
         validation_alias="DOCUMENT_SUPPORTED_EXTENSIONS",
