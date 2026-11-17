@@ -154,6 +154,7 @@ def test_xls_with_cached_values_and_cell_locations(tmp_path: Path) -> None:
 
 def test_configuration_and_backfill_filter_selectors(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     # Production .env can intentionally override extension defaults.
     # Test the defaults independently of a developer's local settings.
@@ -163,10 +164,15 @@ def test_configuration_and_backfill_filter_selectors(
     assert {".xls", ".vsdx"}.issubset(settings.attachment_supported_extensions)
     assert {".xls", ".vsdx"}.issubset(settings.document_supported_extensions)
 
-    # Explicit configuration is authoritative, even if it omits new formats.
-    monkeypatch.setenv("ATTACHMENT_SUPPORTED_EXTENSIONS", ".pdf,.docx")
-    monkeypatch.setenv("DOCUMENT_SUPPORTED_EXTENSIONS", ".pdf,.docx")
-    overridden = Settings(_env_file=None)
+    # Simulate a pre-existing .env copied from the old installation.
+    # This is the exact regression that occurred on the test laptop.
+    config_file = tmp_path / ".env"
+    config_file.write_text(
+        "ATTACHMENT_SUPPORTED_EXTENSIONS=.pdf,.docx\n"
+        "DOCUMENT_SUPPORTED_EXTENSIONS=.pdf,.docx\n",
+        encoding="utf-8",
+    )
+    overridden = Settings(_env_file=config_file)
     assert ".xls" not in overridden.attachment_supported_extensions
     assert ".vsdx" not in overridden.document_supported_extensions
 
