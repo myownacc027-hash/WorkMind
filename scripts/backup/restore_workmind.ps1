@@ -96,23 +96,23 @@ if (-not (Test-Path $BackupPath)) {
     exit 1
 }
 
-# ── Safety gate ──────────────────────────────────────────────────────────
+# -- Safety gate ----------------------------------------------------------
 $PRODUCTION_DB = "workmind"
 if ($TargetDatabase -eq $PRODUCTION_DB -and -not $ConfirmDestructiveRestore) {
     Write-Host ""
-    Write-Host "╔══════════════════════════════════════════════════════╗" -ForegroundColor Red
-    Write-Host "║  SAFETY BLOCK: PRODUCTION RESTORE REQUIRES           ║" -ForegroundColor Red
-    Write-Host "║  -ConfirmDestructiveRestore                          ║" -ForegroundColor Red
-    Write-Host "║                                                      ║" -ForegroundColor Red
-    Write-Host "║  This will DESTROY the current 'workmind' database.  ║" -ForegroundColor Red
-    Write-Host "║  There is no undo. Make sure you have a valid backup ║" -ForegroundColor Red
-    Write-Host "║  and have stopped all WorkMind services first.       ║" -ForegroundColor Red
-    Write-Host "╚══════════════════════════════════════════════════════╝" -ForegroundColor Red
+    Write-Host "+======================================================+" -ForegroundColor Red
+    Write-Host "|  SAFETY BLOCK: PRODUCTION RESTORE REQUIRES           |" -ForegroundColor Red
+    Write-Host "|  -ConfirmDestructiveRestore                          |" -ForegroundColor Red
+    Write-Host "|                                                      |" -ForegroundColor Red
+    Write-Host "|  This will DESTROY the current 'workmind' database.  |" -ForegroundColor Red
+    Write-Host "|  There is no undo. Make sure you have a valid backup |" -ForegroundColor Red
+    Write-Host "|  and have stopped all WorkMind services first.       |" -ForegroundColor Red
+    Write-Host "+======================================================+" -ForegroundColor Red
     Write-Host ""
     exit 1
 }
 
-# ── Build args ───────────────────────────────────────────────────────────
+# -- Build args -----------------------------------------------------------
 $EngineArgs = @("--backup-path", $BackupPath)
 
 if ($TargetDatabase)        { $EngineArgs += @("--target-database", $TargetDatabase) }
