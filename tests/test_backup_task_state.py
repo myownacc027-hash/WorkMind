@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
+import uuid
 
 import pytest
 
@@ -36,9 +39,22 @@ def test_task_state_requires_numeric_output(monkeypatch, value, expected):
     monkeypatch.setattr(engine, "run_ps", fake_run_ps)
     assert engine.task_state() == expected
     assert len(commands) == 1
-    assert "[int]$task.State" in commands[0]
-    assert "Get-ScheduledTask" in commands[0]
+    assert "[int]$tasks[0].State" in commands[0]
+    assert "Get-ScheduledTask -ErrorAction Stop" in commands[0]
+    assert "exit 0" in commands[0]
+    assert "exit 1" in commands[0]
 
+
+
+@pytest.mark.skipif(
+    os.name != "nt" or shutil.which("powershell") is None,
+    reason="Requires real Windows PowerShell and Task Scheduler",
+)
+def test_missing_task_with_real_windows_powershell(monkeypatch):
+    """Regression: absent task previously produced exit 1 with empty stderr."""
+    never_created_task = "WorkMind-Test-Missing-" + uuid.uuid4().hex
+    monkeypatch.setattr(engine, "TASK_NAME", never_created_task)
+    assert engine.task_state() is None
 
 @pytest.mark.parametrize("unexpected", ["Ready", "Running", "Disabled", "???"])
 def test_task_state_rejects_unexpected_output(monkeypatch, unexpected):
