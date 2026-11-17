@@ -152,9 +152,23 @@ def test_xls_with_cached_values_and_cell_locations(tmp_path: Path) -> None:
     assert result.metadata["cached_formula_values_only"] is True
 
 
-def test_configuration_and_backfill_filter_selectors() -> None:
-    settings = Settings()
+def test_configuration_and_backfill_filter_selectors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Production .env can intentionally override extension defaults.
+    # Test the defaults independently of a developer's local settings.
+    monkeypatch.delenv("ATTACHMENT_SUPPORTED_EXTENSIONS", raising=False)
+    monkeypatch.delenv("DOCUMENT_SUPPORTED_EXTENSIONS", raising=False)
+    settings = Settings(_env_file=None)
     assert {".xls", ".vsdx"}.issubset(settings.attachment_supported_extensions)
     assert {".xls", ".vsdx"}.issubset(settings.document_supported_extensions)
+
+    # Explicit configuration is authoritative, even if it omits new formats.
+    monkeypatch.setenv("ATTACHMENT_SUPPORTED_EXTENSIONS", ".pdf,.docx")
+    monkeypatch.setenv("DOCUMENT_SUPPORTED_EXTENSIONS", ".pdf,.docx")
+    overridden = Settings(_env_file=None)
+    assert ".xls" not in overridden.attachment_supported_extensions
+    assert ".vsdx" not in overridden.document_supported_extensions
+
     assert _filter_values(".XLS, .vsdx,.xls") == {".xls", ".vsdx"}
     assert _filter_values("") == set()
