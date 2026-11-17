@@ -103,10 +103,25 @@ def task_state() -> str | None:
     default. Explicitly convert it to an integer in the child process:
     1=Disabled, 2=Queued, 3=Ready, 4=Running.
     """
+    # A name-specific lookup emits a non-terminating error for a missing
+    # task. PowerShell may consequently exit with code 1 even under
+    # -ErrorAction SilentlyContinue. Enumerate and filter instead, so a
+    # missing task is a successful, explicit no-op, while genuine Task
+    # Scheduler errors still abort the backup.
     res = run_ps(
-        f'$task = Get-ScheduledTask -TaskName "{TASK_NAME}" '
-        '-ErrorAction SilentlyContinue; '
-        'if ($null -ne $task) { [int]$task.State }'
+        '$ErrorActionPreference = "Stop"; '
+        'try { '
+        '$tasks = @(Get-ScheduledTask -ErrorAction Stop | '
+        f'Where-Object {{ $_.TaskName -eq "{TASK_NAME}" }}); '
+        'if ($tasks.Count -gt 1) { '
+        'throw "Multiple scheduled tasks share the configured name" '
+        '}; '
+        'if ($tasks.Count -eq 1) { [int]$tasks[0].State }; '
+        'exit 0 '
+        '} catch { '
+        '[Console]::Error.WriteLine($_.Exception.Message); '
+        'exit 1 '
+        '}'
     )
     if res.returncode != 0:
         raise RuntimeError(
