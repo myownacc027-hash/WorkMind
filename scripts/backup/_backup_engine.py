@@ -97,26 +97,43 @@ def run_ps(cmd: str, *, timeout: int = 30) -> subprocess.CompletedProcess[str]:
 
 
 def task_state() -> str | None:
-    """Return numeric state string or None if task not found."""
+    """Return numeric Task Scheduler state, or None if task is absent.
+
+    PowerShell prints the enum name (e.g. 'Running' or 'Disabled') by
+    default. Explicitly convert it to an integer in the child process:
+    1=Disabled, 2=Queued, 3=Ready, 4=Running.
+    """
     res = run_ps(
-        f'(Get-ScheduledTask -TaskName "{TASK_NAME}" '
-        '-ErrorAction SilentlyContinue).State'
+        f'$task = Get-ScheduledTask -TaskName "{TASK_NAME}" '
+        '-ErrorAction SilentlyContinue; '
+        'if ($null -ne $task) { [int]$task.State }'
     )
+    if res.returncode != 0:
+        raise RuntimeError(
+            f"Could not inspect scheduled task {TASK_NAME!r}: "
+            f"{res.stderr.strip()}"
+        )
     val = res.stdout.strip()
-    return val if val else None
+    if not val:
+        return None
+    if val not in {"0", "1", "2", "3", "4"}:
+        raise RuntimeError(
+            f"Unexpected scheduled task state for {TASK_NAME!r}: {val!r}"
+        )
+    return val
 
 
 def wait_for_task_idle(timeout_seconds: int = 300) -> None:
-    """Block until task is not in Running state."""
+    """Block while the scheduled task is queued or running."""
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         state = task_state()
         if state is None:
             logger.warning("Scheduled task '%s' not found — skipping wait.", TASK_NAME)
             return
-        if state != "4":  # 4 = Running
+        if state not in {"2", "4"}:  # Queued / Running
             return
-        logger.info("Task '%s' is running (state=%s). Waiting 10 s...", TASK_NAME, state)
+        logger.info("Task '%s' is busy (state=%s). Waiting 10 s...", TASK_NAME, state)
         time.sleep(10)
     raise TimeoutError(
         f"Task '{TASK_NAME}' still running after {timeout_seconds}s"
