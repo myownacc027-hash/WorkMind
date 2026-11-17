@@ -18,6 +18,15 @@ from packages.database.repositories import (
 from packages.database.session import SessionLocal
 from packages.storage import resolve_attachment_path
 
+def _filter_values(value: str) -> set[str]:
+    """Parse comma-separated selectors; an empty value disables filtering."""
+    return {
+        part.strip().lower()
+        for token in value.split(",")
+        if (part := token.strip().lower())
+    }
+
+
 app = typer.Typer(
     add_completion=False,
     help="Queue existing archived attachments for extraction.",
@@ -36,8 +45,26 @@ def backfill(
         "--reset-errors",
         help="Retry attachments/jobs currently marked as error.",
     ),
+    extensions: str = typer.Option(
+        "",
+        "--extensions",
+        help="Only these comma-separated extensions, e.g. .xls,.vsdx.",
+    ),
+    statuses: str = typer.Option(
+        "",
+        "--statuses",
+        help="Only these comma-separated attachment statuses, e.g. unsupported.",
+    ),
 ) -> None:
     settings = get_settings()
+    extension_filter = _filter_values(extensions)
+    status_filter = _filter_values(statuses)
+    if any(not ext.startswith(".") or len(ext) < 2 for ext in extension_filter):
+        raise typer.BadParameter("Extensions must begin with a dot, e.g. .xls,.vsdx.")
+
+    disabled_extensions = sorted(
+        extension_filter - settings.attachment_supported_extensions
+    )
 
     with SessionLocal() as session:
         attachments = list(
@@ -79,6 +106,17 @@ def backfill(
 
         report = {
             "mode": "apply" if apply else "dry_run",
+            "extension_filter": sorted(extension_filter),
+            "status_filter": sorted(status_filter),
+            "disabled_by_configuration": disabled_extensions,
+            "configuration_warning": (
+                "Selected extension(s) are disabled by "
+                "ATTACHMENT_SUPPORTED_EXTENSIONS in .env or process "
+                "environment. Update that allowlist before --apply."
+                if disabled_extensions
+                else None
+            ),
+            "filtered_out": 0,
             "total_attachments": len(attachments),
             "supported": 0,
             "unsupported": 0,
@@ -91,6 +129,12 @@ def backfill(
 
         for attachment in attachments:
             extension = Path(attachment.filename).suffix.lower()
+            if (
+                (extension_filter and extension not in extension_filter)
+                or (status_filter and attachment.processing_status.lower() not in status_filter)
+            ):
+                report["filtered_out"] += 1
+                continue
             if extension not in settings.attachment_supported_extensions:
                 report["unsupported"] += 1
                 if apply and attachment.processing_status == "new":

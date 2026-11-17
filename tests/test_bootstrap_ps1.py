@@ -64,8 +64,12 @@ exit $LASTEXITCODE
 """,
         encoding="utf-8",
     )
+    # Windows PowerShell may default to Restricted, which prevents even the
+    # temporary test driver from starting. Use a process-scoped policy for
+    # this trusted pytest-generated script; do not change user/machine policy.
+    policy_args = ["-ExecutionPolicy", "Bypass"] if os.name == "nt" else []
     result = subprocess.run(
-        [PWSH, "-NoProfile", "-File", str(driver)],
+        [PWSH, "-NoProfile", *policy_args, "-File", str(driver)],
         env={**os.environ, "FAIL_AT": failure},
         cwd=tmp_path,
         capture_output=True,
