@@ -881,6 +881,17 @@ def extract_attachment(
         )
 
     try:
+        if extension in {".xls", ".vsdx"}:
+            from packages.processing.legacy_formats import (
+                extract_vsdx,
+                extract_xls,
+            )
+
+            return (
+                extract_xls(path, max_chars)
+                if extension == ".xls"
+                else extract_vsdx(path, max_chars)
+            )
         if extension == ".pdf":
             return _extract_pdf(path, max_chars)
         if extension == ".docx":
