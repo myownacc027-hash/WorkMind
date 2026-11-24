@@ -323,6 +323,9 @@ Register-ScheduledTask -TaskName "WorkMind Daily Backup" -Action $action -Trigge
 
 ## Retention Policy (Future)
 
+> [!IMPORTANT]
+> **Разовая очистка после пятилетнего импорта отслеживается отдельно:** [issue #7](https://github.com/myownacc027-hash/WorkMind/issues/7) и [обязательный чек-лист](operations/post-import-cleanup.md). Нельзя автоматически удалять старые бэкапы лишь потому, что новый PR слит или почтовый импорт завершился. Перед удалением нужна проверенная новая точка восстановления (включая завершённые вложения) и подтверждение владельца. Если живые данные и бэкап хранятся на одном физическом диске, это не защита от его отказа.
+
 > [!NOTE]
 > Automatic retention/cleanup is **not implemented** in BACKUP-01.
 > Delete old backups manually until a retention policy is implemented.
