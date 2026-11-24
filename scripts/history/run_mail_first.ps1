@@ -4,8 +4,8 @@
 
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)]
-    [string] $BackupRoot,
+    [string] $BackupRoot = '',
+    [string] $VerifiedBackupPath = '',
     [ValidateRange(1, 10000)]
     [int] $BatchMessages = 2000,
     [ValidateRange(1, 100000)]
@@ -14,6 +14,14 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+if (
+    ([string]::IsNullOrWhiteSpace($BackupRoot) -and
+     [string]::IsNullOrWhiteSpace($VerifiedBackupPath)) -or
+    (-not [string]::IsNullOrWhiteSpace($BackupRoot) -and
+     -not [string]::IsNullOrWhiteSpace($VerifiedBackupPath))
+) {
+    throw 'Specify exactly one: -BackupRoot (new backup) OR -VerifiedBackupPath (reuse verified backup).'
+}
 $Project = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $ExeDir = Join-Path $Project '.venv\Scripts'
 $Python = Join-Path $ExeDir 'python.exe'
@@ -82,13 +90,8 @@ function Check-Services {
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace([string]$dockerVersion)) {
         throw 'Docker Desktop is offline. Open Docker Desktop first.'
     }
-    $volumes = @(& docker volume ls --format '{{.Name}}')
-    if ($LASTEXITCODE -ne 0) { throw 'Docker volume enumeration failed.' }
-    foreach ($volume in @('workmind_workmind_postgres_data', 'workmind_workmind_qdrant_data')) {
-        if ($volumes -notcontains $volume) {
-            throw ('Existing WorkMind Docker volume not found: ' + $volume)
-        }
-    }
+    # Volume names depend on Docker Compose project name.
+    # Probe the live services instead of guessing their volume names.
     $pg = & docker exec workmind-postgres pg_isready -U workmind -d workmind
     if ($LASTEXITCODE -ne 0) { throw ('PostgreSQL is unavailable: ' + $pg) }
     $qdrant = Invoke-RestMethod -Uri 'http://127.0.0.1:6333/collections/workmind_chunks' -TimeoutSec 10
@@ -140,6 +143,19 @@ function Retry-Task {
 }
 
 function Backup-Checkpoint {
+    if (-not [string]::IsNullOrWhiteSpace($VerifiedBackupPath)) {
+        $manifest = Join-Path $VerifiedBackupPath 'manifest.json'
+        if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) {
+            throw ('Verified backup manifest is missing: ' + $manifest)
+        }
+        $verificationLog = Join-Path $SessionDir 'existing-backup-verify.log'
+        & $Python (Join-Path $Project 'scripts\backup\_verify_engine.py') --backup-path $VerifiedBackupPath *> $verificationLog
+        if ($LASTEXITCODE -ne 0) {
+            throw ('Existing backup failed verification: ' + $verificationLog)
+        }
+        Log ('Reusing verified backup: ' + $VerifiedBackupPath)
+        return
+    }
     if (-not (Test-Path -LiteralPath $BackupRoot -PathType Container)) {
         New-Item -ItemType Directory -Force -Path $BackupRoot | Out-Null
     }
@@ -165,8 +181,18 @@ try {
     if (-not $HasMutex) { throw 'Another WorkMind history auto runner is active.' }
     Status 'RUNNING'
     Log ('Mail-first runner started: ' + $SessionDir)
-    if (-not @(Get-Process -Name 'OUTLOOK' -ErrorAction SilentlyContinue).Count) {
+    $outlook = @(Get-Process -Name 'OUTLOOK' -ErrorAction SilentlyContinue)
+    if ($outlook.Count -eq 0) {
         throw 'Classic Outlook must be running in this user session.'
+    }
+    # Refuse to run alongside the retired all-in-one automation.
+    $legacy = @(Get-CimInstance Win32_Process | Where-Object {
+        $_.Name -eq 'powershell.exe' -and
+        $_.ProcessId -ne $PID -and
+        $_.CommandLine -like '*workmind-history-resume.ps1*'
+    })
+    if ($legacy.Count -gt 0) {
+        throw 'The legacy workmind-history-resume.ps1 runner is still active.'
     }
     if (Check-Stop) { return }
     Check-Services
