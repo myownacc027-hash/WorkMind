@@ -55,12 +55,34 @@ def backfill(
         "--statuses",
         help="Only these comma-separated attachment statuses, e.g. unsupported.",
     ),
+    reindex_indexed: bool = typer.Option(
+        False,
+        "--reindex-indexed",
+        help=(
+            "Explicitly allow re-queuing indexed attachments. Requires "
+            "--statuses indexed and --extensions to limit the scope."
+        ),
+    ),
+    truncated_only: bool = typer.Option(
+        False,
+        "--truncated-only",
+        help="Only attachments previously marked metadata.truncated=true.",
+    ),
 ) -> None:
     settings = get_settings()
     extension_filter = _filter_values(extensions)
     status_filter = _filter_values(statuses)
     if any(not ext.startswith(".") or len(ext) < 2 for ext in extension_filter):
         raise typer.BadParameter("Extensions must begin with a dot, e.g. .xls,.vsdx.")
+    if reindex_indexed and (not extension_filter or status_filter != {"indexed"}):
+        raise typer.BadParameter(
+            "--reindex-indexed requires explicit --extensions "
+            "and exactly --statuses indexed."
+        )
+    if truncated_only and not reindex_indexed:
+        raise typer.BadParameter(
+            "--truncated-only requires --reindex-indexed."
+        )
 
     disabled_extensions = sorted(
         extension_filter - settings.attachment_supported_extensions
@@ -108,6 +130,9 @@ def backfill(
             "mode": "apply" if apply else "dry_run",
             "extension_filter": sorted(extension_filter),
             "status_filter": sorted(status_filter),
+            "reindex_indexed": reindex_indexed,
+            "truncated_only": truncated_only,
+            "reindex_candidates": 0,
             "disabled_by_configuration": disabled_extensions,
             "configuration_warning": (
                 "Selected extension(s) are disabled by "
@@ -132,6 +157,10 @@ def backfill(
             if (
                 (extension_filter and extension not in extension_filter)
                 or (status_filter and attachment.processing_status.lower() not in status_filter)
+                or (
+                    truncated_only
+                    and attachment.metadata_json.get("truncated") is not True
+                )
             ):
                 report["filtered_out"] += 1
                 continue
@@ -165,8 +194,10 @@ def backfill(
                 attachment.processing_status == "indexed"
                 and attachment.id in indexed_attachment_ids
             ):
-                report["already_indexed"] += 1
-                continue
+                if not reindex_indexed:
+                    report["already_indexed"] += 1
+                    continue
+                report["reindex_candidates"] += 1
 
             if attachment.id in active_job_ids:
                 report["already_queued"] += 1

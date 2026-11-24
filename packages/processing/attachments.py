@@ -531,6 +531,11 @@ def _extract_xlsx_ooxml(
             for title, member in sheets:
                 root = ElementTree.fromstring(archive.read(member))
                 sheet_lines: list[str] = []
+                sheet_lines_chars = 0
+                header = f"[Лист: {title}]\n"
+                prefix_chars = len("\n\n".join(parts)) + (
+                    2 if parts else 0
+                )
                 for row in root.iter(row_tag):
                     row_number = row.attrib.get("r") or "?"
                     cells: list[str] = []
@@ -552,26 +557,24 @@ def _extract_xlsx_ooxml(
                     if not cells:
                         continue
                     rows_seen += 1
-                    sheet_lines.append(
-                        f"{row_number}\t" + "\t".join(cells)
+                    line = f"{row_number}\t" + "\t".join(cells)
+                    sheet_lines_chars += len(line) + (
+                        1 if sheet_lines else 0
                     )
+                    sheet_lines.append(line)
 
-                    candidate = "\n\n".join(
-                        parts
-                        + [
-                            f"[Лист: {title}]\n"
-                            + "\n".join(sheet_lines)
-                        ]
-                    )
-                    if len(candidate) >= max_chars:
+                    # Avoid reconstructing all preceding rows for each row.
+                    if (
+                        prefix_chars
+                        + len(header)
+                        + sheet_lines_chars
+                        >= max_chars
+                    ):
                         truncated = True
                         break
 
                 if sheet_lines:
-                    parts.append(
-                        f"[Лист: {title}]\n"
-                        + "\n".join(sheet_lines)
-                    )
+                    parts.append(header + "\n".join(sheet_lines))
                 if truncated:
                     break
 
@@ -639,51 +642,64 @@ def _extract_xlsx(path: Path, max_chars: int) -> ExtractionResult:
                 module=r"openpyxl\..*",
             )
 
-            workbook = load_workbook(
-                filename=str(path),
-                read_only=True,
-                data_only=False,
-            )
-            parts: list[str] = []
-            rows_seen = 0
-            truncated = False
-            sheet_count = len(workbook.sheetnames)
+            # CAS objects are named by SHA-256 and have no extension.
+            # openpyxl rejects those *paths* even when their XLSX contents
+            # are valid. A binary file handle bypasses the filename check.
+            # Keep it open until the read-only workbook has been consumed.
+            with path.open("rb") as source:
+                workbook = load_workbook(
+                    filename=source,
+                    read_only=True,
+                    data_only=False,
+                )
+                parts: list[str] = []
+                rows_seen = 0
+                truncated = False
+                sheet_count = len(workbook.sheetnames)
+                # Exact length of "\n".join(parts) while the workbook grows.
+                parts_chars = 0
 
-            try:
-                for worksheet in workbook.worksheets:
-                    sheet_lines = [f"[Лист: {worksheet.title}]"]
-                    for row_number, row in enumerate(
-                        worksheet.iter_rows(values_only=True),
-                        start=1,
-                    ):
-                        values = [
-                            _cell_text(value)
-                            for value in row
-                        ]
-                        while values and not values[-1]:
-                            values.pop()
-                        if not any(values):
-                            continue
-                        rows_seen += 1
-                        sheet_lines.append(
-                            f"{row_number}\t"
-                            + "\t".join(values)
-                        )
-                        if (
-                            len(
-                                "\n".join(
-                                    parts + sheet_lines
-                                )
-                            )
-                            >= max_chars
+                try:
+                    for worksheet in workbook.worksheets:
+                        sheet_lines = [f"[Лист: {worksheet.title}]"]
+                        sheet_chars = len(sheet_lines[0])
+                        for row_number, row in enumerate(
+                            worksheet.iter_rows(values_only=True),
+                            start=1,
                         ):
-                            truncated = True
+                            values = [
+                                _cell_text(value)
+                                for value in row
+                            ]
+                            while values and not values[-1]:
+                                values.pop()
+                            if not any(values):
+                                continue
+                            rows_seen += 1
+                            line = f"{row_number}\t" + "\t".join(values)
+                            sheet_chars += 1 + len(line)
+                            sheet_lines.append(line)
+
+                            # Length of "\n".join(parts + sheet_lines).
+                            # Do not join the full accumulated text per row.
+                            if (
+                                parts_chars
+                                + (1 if parts else 0)
+                                + sheet_chars
+                                >= max_chars
+                            ):
+                                truncated = True
+                                break
+
+                        sheet_text = "\n".join(sheet_lines)
+                        parts_chars += len(sheet_text) + (
+                            1 if parts else 0
+                        )
+                        parts.append(sheet_text)
+                        if truncated:
                             break
-                    parts.append("\n".join(sheet_lines))
-                    if truncated:
-                        break
-            finally:
-                workbook.close()
+                finally:
+                    workbook.close()
 
         text, was_limited = _limit(
             _normalize("\n\n".join(parts)),
@@ -707,7 +723,6 @@ def _extract_xlsx(path: Path, max_chars: int) -> ExtractionResult:
             max_chars,
             primary_error=primary_error,
         )
-
 
 def _extract_pptx(path: Path, max_chars: int) -> ExtractionResult:
     presentation = Presentation(str(path))
