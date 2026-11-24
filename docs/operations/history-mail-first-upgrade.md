@@ -30,12 +30,22 @@ The previous behavior forced valid XLSX files into the slower OOXML fallback.
 4. Create and verify a full backup containing PostgreSQL, CAS and Qdrant.
 5. Apply the patch to the stopped deployment, run targeted tests followed
    by the normal test suite, and check WorkMind infrastructure health.
-6. Resume historical import with the existing cursors and flags
-   --years 5 --max-messages 2000 --index (never --reset).
-   The mail-first runner must not start attachment workers between history
-   passes. It must stop on reported errors.
-7. Once all eligible folders complete, run the attachment worker until its
-   queue is empty and then validate the PostgreSQL/Qdrant index.
+6. Resume with the repository-native mail-first runner (Windows PowerShell 5.1),
+   passing the intended backup directory explicitly:
+
+       powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\history\run_mail_first.ps1 -BackupRoot "<backup-directory>"
+
+   It uses existing cursors, imports 2,000 messages per pass, and indexes
+   their email texts while leaving attachment jobs queued. It never uses
+   --reset. It also has a --MailOnly switch to stop after all mail is indexed.
+7. To request a cooperative pause from the NEW runner, create an empty file
+   named mail-first-stop.request in the configured WORKMIND_HOME/run directory.
+   The runner checks that flag between email passes and before starting its
+   attachment phase. It does NOT interrupt an in-flight importer or worker.
+   Remove the flag deliberately before resuming. This flag is NOT supported by
+   the earlier auto runner.
+8. Once all eligible folders complete, the runner processes the queued
+   attachments and checks PostgreSQL/Qdrant index and outstanding jobs.
 8. Reprocessing previously truncated XLSX/XLS is an explicit independent
    operation and does not happen automatically after a code update.
 
