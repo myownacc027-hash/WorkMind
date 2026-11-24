@@ -123,13 +123,19 @@ function Retry-Task {
         [string] $Label
     )
     for ($try = 1; $try -le 6; $try++) {
-        Check-Services
-        Check-FreeSpace
-        $code = Captured -Exe $Exe -CliArgs $CliArgs -Label ($Label + '-try' + $try)
-        if ($code -eq 0) { return }
-        if ($try -ge 6) { throw ($Label + ' failed after six attempts.') }
-        Log ('Retry ' + $Label + ' in 120 seconds.')
-        Start-Sleep -Seconds 120
+        try {
+            Check-Services
+            Check-FreeSpace
+            $code = Captured -Exe $Exe -CliArgs $CliArgs -Label ($Label + '-try' + $try)
+            if ($code -eq 0) { return }
+            throw ($Label + ' exited with code ' + $code)
+        }
+        catch {
+            Log ('Attempt ' + $try + ' for ' + $Label + ' failed: ' + $_.Exception.Message)
+            if ($try -ge 6) { throw }
+            Log ('Retry ' + $Label + ' in 120 seconds.')
+            Start-Sleep -Seconds 120
+        }
     }
 }
 
@@ -203,6 +209,14 @@ try {
     Retry-Task -Exe 'workmind-attachments-worker.exe' -CliArgs @(
         '--batch-size', '10', '--until-empty', '--max-batches', '100000'
     ) -Label 'attachments-final'
+    $queue = & (Join-Path $ExeDir 'workmind-attachments-status.exe') | ConvertFrom-Json
+    if ($LASTEXITCODE -ne 0) { throw 'Attachment queue status check failed.' }
+    foreach ($state in @('pending', 'processing', 'error')) {
+        $property = $queue.jobs.PSObject.Properties[$state]
+        if ($null -ne $property -and [int]$property.Value -gt 0) {
+            throw ('Attachment jobs remain ' + $state + ': ' + $property.Value)
+        }
+    }
     Retry-Task -Exe 'workmind-index-admin.exe' -CliArgs @('check') -Label 'index-final'
     $health = & (Join-Path $ExeDir 'workmind-mcp-check.exe') | ConvertFrom-Json
     if ($LASTEXITCODE -ne 0 -or -not $health.ok) {
