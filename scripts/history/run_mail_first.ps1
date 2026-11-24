@@ -14,6 +14,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# All Python CLI children write UTF-8 even when Windows uses a legacy
+# console code page. Inherited only by children of this runner.
+$env:PYTHONIOENCODING = 'utf-8:backslashreplace'
 if (
     ([string]::IsNullOrWhiteSpace($BackupRoot) -and
      [string]::IsNullOrWhiteSpace($VerifiedBackupPath)) -or
