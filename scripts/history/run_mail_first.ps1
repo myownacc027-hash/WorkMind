@@ -227,7 +227,8 @@ try {
 }
 catch {
     Log ('FAILED: ' + $_.Exception.Message)
-    Status 'FAILED'
+    # Do not overwrite a live runner's shared status if its mutex is held.
+    if ($HasMutex) { Status 'FAILED' }
     exit 1
 }
 finally {
