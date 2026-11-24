@@ -6,7 +6,26 @@ import sys
 import structlog
 
 
+def _configure_utf8_stdio() -> None:
+    """Keep redirected Windows console/log streams Unicode-safe.
+
+    Windows Python may default to a legacy code page when stdout/stderr
+    are redirected. Structured logs include Outlook subjects, attachment
+    filenames, and other text that may contain characters outside it.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if not callable(reconfigure):
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="backslashreplace")
+        except (OSError, ValueError, TypeError):
+            # Nonstandard capture streams may not support reconfiguration.
+            pass
+
+
 def configure_logging(level: str = "INFO") -> None:
+    _configure_utf8_stdio()
     numeric_level = getattr(logging, level.upper(), logging.INFO)
     logging.basicConfig(stream=sys.stdout, level=numeric_level, format="%(message)s")
 
