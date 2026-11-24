@@ -10,6 +10,12 @@
 - [Obsidian Projection](projection/obsidian.md)
 - [LLM Provider and Knowledge Extraction](architecture/llm-provider-and-knowledge-extraction.md)
 
+## Эксплуатация и сопровождение
+
+- [Исторический импорт: mail-first и безопасное переключение](operations/history-mail-first-upgrade.md)
+- [Обязательная проверка и очистка после импорта](operations/post-import-cleanup.md) ([GitHub issue #7](https://github.com/myownacc027-hash/WorkMind/issues/7))
+- [Резервное копирование и восстановление](backup-and-restore.md)
+
 ## Architecture Decision Records
 
 - [ADR-001: PostgreSQL — source of truth](adr/001-postgresql-source-of-truth.md)
