@@ -31,9 +31,17 @@ The previous behavior forced valid XLSX files into the slower OOXML fallback.
 5. Apply the patch to the stopped deployment, run targeted tests followed
    by the normal test suite, and check WorkMind infrastructure health.
 6. Resume with the repository-native mail-first runner (Windows PowerShell 5.1),
-   passing the intended backup directory explicitly:
+   passing either a directory for a NEW backup, or the path to an
+   ALREADY VERIFIED backup. Never pass both parameters together:
 
        powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\history\run_mail_first.ps1 -BackupRoot "<backup-directory>"
+
+       powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\history\run_mail_first.ps1 -VerifiedBackupPath "<verified-backup-directory>"
+
+   The second form verifies the manifest, PostgreSQL dump, CAS file layout,
+   and Qdrant snapshot hash without copying the database a second time.
+   If the database has changed since the backup, note that changes made
+   after the snapshot will not be in that recovery point.
 
    It uses existing cursors, imports 2,000 messages per pass, and indexes
    their email texts while leaving attachment jobs queued. It never uses
