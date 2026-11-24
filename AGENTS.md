@@ -19,7 +19,7 @@
 
 - Active tracking task: [issue #7](https://github.com/myownacc027-hash/WorkMind/issues/7).
 - Authoritative operational checklist: [post-import-cleanup.md](docs/operations/post-import-cleanup.md).
-- BACKUP-02 retention is not yet implemented; do not infer that old backups may be deleted automatically.
+- Routine production backup rotation is tracked in [BACKUP-02 issue #8](https://github.com/myownacc027-hash/WorkMind/issues/8), independently from one-time post-import cleanup in issue #7. The target is two most recent verified backups plus one distinct monthly backup, not the obsolete 7/4/6 archive proposal. BACKUP-02 is NOT YET implemented: never infer that old backups may be deleted automatically.
 - Keep issue #7 **open** until: mail and attachments finish, indexes/CAS are verified, a new post-import backup is verified (preferably restore-tested), the owner approves an inventory of cleanup targets, the cleanup is executed, and WorkMind passes post-cleanup checks.
 - The only default cleanup behavior is **read-only inventory/dry-run**; deletion requires explicit approval for each affected category/path. Do not delete the last verified recovery point.
 
