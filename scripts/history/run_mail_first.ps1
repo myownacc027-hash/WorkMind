@@ -10,6 +10,8 @@ param(
     [int] $BatchMessages = 2000,
     [ValidateRange(1, 100000)]
     [int] $MinFreeGB = 100,
+    [ValidateRange(60, 86400)]
+    [int] $MailIdleTimeoutSeconds = 600,
     [switch] $MailOnly
 )
 
@@ -111,7 +113,40 @@ function Captured {
     )
     $outFile = Join-Path $SessionDir ($Label + '.stdout.log')
     $errFile = Join-Path $SessionDir ($Label + '.stderr.log')
-    $proc = Start-Process -FilePath (Join-Path $ExeDir $Exe) -ArgumentList $CliArgs -WorkingDirectory $Project -PassThru -Wait -NoNewWindow -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+    $startParams = @{
+        FilePath = (Join-Path $ExeDir $Exe)
+        ArgumentList = $CliArgs
+        WorkingDirectory = $Project
+        PassThru = $true
+        NoNewWindow = $true
+        RedirectStandardOutput = $outFile
+        RedirectStandardError = $errFile
+    }
+    if ($Exe -ne 'workmind-history-import.exe') {
+        $proc = Start-Process @startParams -Wait
+    } else {
+        # A COM call can block forever without raising a Python exception.
+        # Watch actual log activity, not total elapsed import duration.
+        $proc = Start-Process @startParams
+        $lastProgress = [DateTime]::UtcNow
+        $lastSignature = ''
+        while (-not $proc.WaitForExit(5000)) {
+            $signature = (@(Get-Item -LiteralPath $outFile, $errFile |
+                ForEach-Object { "$($_.Length):$($_.LastWriteTimeUtc.Ticks)" }) -join '|')
+            if ($signature -ne $lastSignature) {
+                $lastSignature = $signature
+                $lastProgress = [DateTime]::UtcNow
+            }
+            if (([DateTime]::UtcNow - $lastProgress).TotalSeconds -ge $MailIdleTimeoutSeconds) {
+                Log ("Mail watchdog: no log activity for $MailIdleTimeoutSeconds seconds; stopping process tree PID " + $proc.Id)
+                & taskkill.exe /PID $proc.Id /T /F | Out-Host
+                if ($LASTEXITCODE -ne 0 -or -not $proc.WaitForExit(30000)) {
+                    throw 'Mail watchdog could not verify termination; do not restart automatically.'
+                }
+                return 124
+            }
+        }
+    }
     $exitCode = [int]$proc.ExitCode
     Log ($Label + ' exit=' + $exitCode)
     if ($exitCode -ne 0) {
@@ -138,7 +173,7 @@ function Retry-Task {
         }
         catch {
             Log ('Attempt ' + $try + ' for ' + $Label + ' failed: ' + $_.Exception.Message)
-            if ($try -ge 6) { throw }
+            if ($try -ge 6 -or $_.Exception.Message -like 'Mail watchdog could not verify*') { throw }
             Log ('Retry ' + $Label + ' in 120 seconds.')
             Start-Sleep -Seconds 120
         }
