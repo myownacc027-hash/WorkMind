@@ -491,6 +491,9 @@ def _history_items(
             item = namespace.GetItemFromID(entry_id, spec.store_id)
             if int(getattr(item, "Class", 0)) != MAIL_ITEM_CLASS:
                 continue
+            live_id = _safe_text(getattr(item, "EntryID", "")).strip()
+            if live_id.casefold() != entry_id.casefold():
+                raise OutlookFolderUnavailable("Outlook item identity changed.")
             yield item, occurred_at
     except Exception as exc:
         # Never silently skip unreadable rows and mark a folder complete.
@@ -585,6 +588,10 @@ def _drain_indexing(
         )
         batches += 1
         last_claimed = int(result["claimed"])
+        logger.info(
+            "history_index_batch", batch=batches, claimed=last_claimed,
+            completed=int(result["completed"]),
+        )
         for key in totals:
             totals[key] += int(result[key])
         if last_claimed == 0:
@@ -1004,6 +1011,7 @@ def import_history(
                     break
 
         # Index after releasing the Outlook lock, so regular mail sync can run.
+        logger.info("history_indexing_started", enabled=index_after_import)
         indexing = (
             _drain_indexing(
                 batch_size=index_batch_size,
