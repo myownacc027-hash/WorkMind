@@ -295,3 +295,70 @@ def test_entry_id_com_failure_remains_retryable():
     with pytest.raises(history.OutlookFolderUnavailable) as error:
         history._require_history_entry_id(UnavailableItem(), folder())
     assert history._retryable_outlook_error(error.value)
+
+
+def test_deleted_boundary_id_does_not_hide_unprocessed_mail():
+    def compare(left, right):
+        if right == "deleted":
+            raise RuntimeError(-2147221233)
+        return left == right
+
+    namespace = SimpleNamespace(CompareEntryIDs=compare)
+    assert not history._committed_history_entry(namespace, "new", ("deleted",))
+    assert history._committed_history_entry(namespace, "new", ("deleted", "new"))
+
+
+def test_folder_discovery_failure_cannot_complete_folder(monkeypatch):
+    class Folders:
+        Count = 1
+
+        def Item(self, index):
+            raise RuntimeError("Exchange unavailable")
+
+    monkeypatch.setattr(history, "_folder_path", lambda folder: "root")
+    with pytest.raises(history.OutlookFolderUnavailable):
+        list(history._walk_folders(SimpleNamespace(Folders=Folders()), excluded=set()))
+
+
+def test_indexing_reports_remaining_jobs_even_when_none_claimable(monkeypatch):
+    class Session:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def execute(self, query):
+            return [("processing", 1), ("error", 2)]
+
+    monkeypatch.setattr(history, "SessionLocal", Session)
+    monkeypatch.setattr(history, "get_settings", lambda: None)
+    monkeypatch.setattr(
+        history, "run_batch",
+        lambda *args, **kwargs: {"claimed": 0, "completed": 0, "failed": 0, "chunks": 0},
+    )
+    result = history._drain_indexing(batch_size=25, max_batches=1)
+    assert result["queue_drained"] is False
+    assert result["queue_remaining"] == {"processing": 1, "error": 2}
+
+
+def test_indexing_reports_failed_batch(monkeypatch):
+    class Session:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def execute(self, query):
+            return [("pending", 1)]
+
+    monkeypatch.setattr(history, "SessionLocal", Session)
+    monkeypatch.setattr(history, "get_settings", lambda: None)
+    monkeypatch.setattr(
+        history, "run_batch",
+        lambda *args, **kwargs: {"claimed": 1, "completed": 0, "failed": 1, "chunks": 0},
+    )
+    result = history._drain_indexing(batch_size=25, max_batches=2)
+    assert result["failed"] == 1
+    assert result["queue_drained"] is False
