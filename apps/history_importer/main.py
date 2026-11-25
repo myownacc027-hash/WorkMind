@@ -10,7 +10,7 @@ from typing import Any, Iterator
 
 import structlog
 import typer
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from apps.history_importer.common import (
     now_iso,
@@ -32,6 +32,7 @@ from packages.common.logging import configure_logging
 from packages.database.models import (
     HistoryImportState,
     Mailbox,
+    ProcessingJob,
 )
 from packages.database.repositories import (
     get_or_create_mailbox,
@@ -140,8 +141,10 @@ def _walk_folders(
 ) -> Iterator[Any]:
     try:
         count = parent.Folders.Count
-    except Exception:
-        return
+    except Exception as exc:
+        raise OutlookFolderUnavailable(
+            f"Could not enumerate child folders of {_folder_path(parent)}: {exc}"
+        ) from exc
 
     for index in range(1, count + 1):
         try:
@@ -153,7 +156,9 @@ def _walk_folders(
                 index=index,
                 error=str(exc),
             )
-            continue
+            raise OutlookFolderUnavailable(
+                f"Could not discover folder {index} of {_folder_path(parent)}: {exc}"
+            ) from exc
 
         if _is_excluded(folder, excluded):
             continue
@@ -630,6 +635,21 @@ def _read_history_window(
     return table, list(rows.values())
 
 
+def _committed_history_entry(
+    namespace: Any, live_id: str, committed_ids: tuple[str, ...]
+) -> bool:
+    for previous in committed_ids:
+        try:
+            if _same_outlook_entry(namespace, live_id, previous):
+                return True
+        except Exception as exc:
+            # A deleted checkpoint item cannot be compared on every provider.
+            # Conservatively replay an ambiguous candidate; do not skip it.
+            if not _is_mapi_not_found(exc):
+                raise
+    return False
+
+
 def _yield_history_candidates(
     namespace: Any,
     spec: HistoricalFolder,
@@ -651,7 +671,7 @@ def _yield_history_candidates(
             raise OutlookFolderUnavailable("Outlook item identity changed.")
         if at_checkpoint and (
             live_id.casefold() in known
-            or any(_same_outlook_entry(namespace, live_id, old) for old in committed_ids)
+            or _committed_history_entry(namespace, live_id, committed_ids)
         ):
             continue
         yield item, occurred_at
@@ -794,11 +814,12 @@ def _drain_indexing(
     *,
     batch_size: int,
     max_batches: int,
-) -> dict[str, int | bool]:
+) -> dict[str, Any]:
     settings = get_settings()
     totals = {
         "claimed": 0,
         "completed": 0,
+        "failed": 0,
         "chunks": 0,
     }
     batches = 0
@@ -817,7 +838,7 @@ def _drain_indexing(
             completed=int(result["completed"]),
         )
         for key in totals:
-            totals[key] += int(result[key])
+            totals[key] += int(result.get(key, 0))
         if last_claimed == 0:
             break
         if (
@@ -826,10 +847,26 @@ def _drain_indexing(
         ):
             break
 
+    # No claimable jobs is not the same as an empty queue: delayed,
+    # interrupted, or terminally failed jobs must also be visible.
+    with SessionLocal() as session:
+        remaining = {
+            str(status): int(count)
+            for status, count in session.execute(
+                select(ProcessingJob.status, func.count())
+                .where(
+                    ProcessingJob.job_type == "index_email",
+                    ProcessingJob.source_type == "email",
+                    ProcessingJob.status != "completed",
+                )
+                .group_by(ProcessingJob.status)
+            )
+        }
     return {
         **totals,
         "batches": batches,
-        "queue_drained": last_claimed == 0,
+        "queue_drained": not remaining,
+        "queue_remaining": remaining,
     }
 
 
@@ -927,12 +964,6 @@ def import_history(
         "archive_store": archive_store,
         "max_messages": max_messages,
     }
-    write_status(
-        settings.history_status_file,
-        settings.history_log_file,
-        base_status,
-    )
-
     totals = {
         "folders_discovered": 0,
         "folders_completed": 0,
@@ -968,11 +999,8 @@ def import_history(
                         3,
                     ),
                 }
-                write_status(
-                    settings.history_status_file,
-                    settings.history_log_file,
-                    result,
-                )
+                # The process holding the Outlook lock may own the
+                # shared status. Do not replace it on contention.
                 print(
                     json.dumps(
                         result,
@@ -982,6 +1010,10 @@ def import_history(
                 )
                 return
 
+            write_status(
+                settings.history_status_file, settings.history_log_file, base_status
+            )
+            logger.info("history_import_started", max_messages=max_messages)
             _, namespace = connect_outlook()
             primary = _find_store(
                 namespace,
@@ -1230,9 +1262,11 @@ def import_history(
             else {
                 "claimed": 0,
                 "completed": 0,
+                "failed": 0,
                 "chunks": 0,
                 "batches": 0,
                 "queue_drained": False,
+                "queue_remaining": {},
             }
         )
         result = {
