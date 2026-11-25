@@ -36,6 +36,7 @@ def test_failed_item_is_not_written_to_history_cursor() -> None:
         if isinstance(node, ast.Call)
     }
     assert {"session.rollback", "session.commit"} <= calls
+    assert "_record_history_cursor" not in calls
     assert any(
         isinstance(node, ast.Assign)
         and any(
