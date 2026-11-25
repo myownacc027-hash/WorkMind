@@ -130,3 +130,30 @@ def test_table_failure_is_retryable_not_successful_empty_folder():
     with pytest.raises(history.OutlookFolderUnavailable) as error:
         list(history._history_items(spec, since=SINCE, state=state()))
     assert history._retryable_outlook_error(error.value)
+
+
+@pytest.mark.parametrize("value", [None, "", "  "])
+def test_empty_entry_id_stops_history_instead_of_advancing_cursor(value):
+    spec = history.HistoricalFolder(
+        store_id="store", store_display_name="archive", source_kind="archive",
+        folder_id="folder", folder_path="archive/inbox",
+        date_attr="ReceivedTime",
+    )
+    with pytest.raises(history.OutlookFolderUnavailable):
+        history._require_history_entry_id(SimpleNamespace(EntryID=value), spec)
+
+
+def test_entry_id_com_failure_remains_retryable():
+    class UnavailableItem:
+        @property
+        def EntryID(self):
+            raise RuntimeError("Exchange unavailable")
+
+    spec = history.HistoricalFolder(
+        store_id="store", store_display_name="archive", source_kind="archive",
+        folder_id="folder", folder_path="archive/inbox",
+        date_attr="ReceivedTime",
+    )
+    with pytest.raises(history.OutlookFolderUnavailable) as error:
+        history._require_history_entry_id(UnavailableItem(), spec)
+    assert history._retryable_outlook_error(error.value)
