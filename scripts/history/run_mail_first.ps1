@@ -130,6 +130,7 @@ function Captured {
         $proc = Start-Process @startParams
         $lastProgress = [DateTime]::UtcNow
         $lastSignature = ''
+        $indexingStarted = $false
         while (-not $proc.WaitForExit(5000)) {
             $signature = (@(Get-Item -LiteralPath $outFile, $errFile |
                 ForEach-Object { "$($_.Length):$($_.LastWriteTimeUtc.Ticks)" }) -join '|')
@@ -137,7 +138,12 @@ function Captured {
                 $lastSignature = $signature
                 $lastProgress = [DateTime]::UtcNow
             }
-            if (([DateTime]::UtcNow - $lastProgress).TotalSeconds -ge $MailIdleTimeoutSeconds) {
+            if (-not $indexingStarted) {
+                $recent = @(Get-Content -LiteralPath $outFile -Tail 20 -Encoding UTF8)
+                $indexingStarted = [bool]($recent -match '"event"\s*:\s*"history_index(ing_started|_batch)"')
+            }
+            if (-not $indexingStarted -and
+                ([DateTime]::UtcNow - $lastProgress).TotalSeconds -ge $MailIdleTimeoutSeconds) {
                 Log ("Mail watchdog: no log activity for $MailIdleTimeoutSeconds seconds; stopping process tree PID " + $proc.Id)
                 & taskkill.exe /PID $proc.Id /T /F | Out-Host
                 if ($LASTEXITCODE -ne 0 -or -not $proc.WaitForExit(30000)) {
