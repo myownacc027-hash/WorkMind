@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import ctypes
 import json
 import time
+from ctypes import wintypes
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Iterator
@@ -351,78 +353,138 @@ def _item_time(
     )
 
 
-# Use namespaced MAPI time columns: Outlook Table returns these in UTC,
-# unlike the built-in local-time ReceivedTime/SentOn column names.
+# MAPI date properties return UTC, unlike built-in local-time columns.
 _TABLE_RECEIVED = "http://schemas.microsoft.com/mapi/proptag/0x0E060040"
 _TABLE_SENT = "http://schemas.microsoft.com/mapi/proptag/0x00390040"
 _TABLE_BATCH_SIZE = 512
-_TABLE_CURSOR_VERSION = 1
+_TABLE_CURSOR_VERSION = 2
 _TABLE_CURSOR_KEY = "history_table_cursor_version"
+_TABLE_CURSOR_IDS_KEY = "history_table_cursor_group_ids"
 _MIN_UTC = datetime.min.replace(tzinfo=UTC)
+_INITIAL_WINDOW = timedelta(days=7)
+_MAX_WINDOW = timedelta(days=90)
 
 
 def _table_utc(value: Any) -> datetime | None:
-    if not isinstance(value, datetime):
+    if not isinstance(value, datetime) or value.year >= 4501:
         return None
-    # The namespaced column's wall-clock value is UTC. Do not interpret
-    # a naive COM date (or its attached local tzinfo) as local time.
     return value.replace(tzinfo=UTC)
 
 
-def _history_order_key(
-    entry_id: str, occurred_at: datetime | None
-) -> tuple[datetime, str]:
-    return occurred_at or _MIN_UTC, entry_id.casefold()
+def _cursor_utc(value: datetime | None) -> datetime | None:
+    if value is None or value.year >= 4501:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def _minute_floor(value: datetime) -> datetime:
+    return value.replace(second=0, microsecond=0)
+
+
+def _format_dasl_utc(value: datetime) -> str:
+    """DASL uses UTC clock values, formatted in the Windows user locale.
+
+    Outlook date comparisons do not support seconds. Use the same Windows
+    date/time formatting APIs as the user session rather than a fixed US
+    or ISO literal which may be interpreted incorrectly by Outlook.
+    """
+    value = value.astimezone(UTC)
+
+    class SystemTime(ctypes.Structure):
+        _fields_ = [
+            (name, wintypes.WORD)
+            for name in (
+                "year", "month", "weekday", "day",
+                "hour", "minute", "second", "millisecond",
+            )
+        ]
+
+    stamp = SystemTime(
+        value.year, value.month, (value.weekday() + 1) % 7,
+        value.day, value.hour, value.minute, 0, 0,
+    )
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    date_format = kernel.GetDateFormatEx
+    date_format.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(SystemTime),
+        wintypes.LPCWSTR, wintypes.LPWSTR, ctypes.c_int, wintypes.LPCWSTR,
+    ]
+    date_format.restype = ctypes.c_int
+    time_format = kernel.GetTimeFormatEx
+    time_format.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(SystemTime),
+        wintypes.LPCWSTR, wintypes.LPWSTR, ctypes.c_int,
+    ]
+    time_format.restype = ctypes.c_int
+    date = ctypes.create_unicode_buffer(256)
+    clock = ctypes.create_unicode_buffer(256)
+    # LOCALE_NAME_USER_DEFAULT, DATE_SHORTDATE / TIME_NOSECONDS.
+    if not date_format(None, 1, ctypes.byref(stamp), None, date, len(date), None):
+        raise ctypes.WinError(ctypes.get_last_error())
+    if not time_format(None, 2, ctypes.byref(stamp), None, clock, len(clock)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return f"{date.value} {clock.value}"
+
+
+def _effective_table_time(
+    received: Any, sent: Any, date_attr: str
+) -> datetime | None:
+    received_at = _table_utc(received)
+    sent_at = _table_utc(sent)
+    if date_attr == "ReceivedTime":
+        return received_at or sent_at
+    return sent_at or received_at
+
+
+def _history_filter(
+    date_attr: str, lower: datetime | None, upper: datetime | None
+) -> str:
+    primary, alternate = (
+        (_TABLE_RECEIVED, _TABLE_SENT)
+        if date_attr == "ReceivedTime"
+        else (_TABLE_SENT, _TABLE_RECEIVED)
+    )
+    p, a = f'"{primary}"', f'"{alternate}"'
+    if lower is None:
+        if upper is not None:
+            raise ValueError("Undated filter cannot have an upper bound.")
+        return f"@SQL=({p} IS NULL AND {a} IS NULL)"
+    low = _format_dasl_utc(lower).replace("'", "''")
+    high = (
+        _format_dasl_utc(upper).replace("'", "''")
+        if upper is not None else None
+    )
+
+    def date_range(prop: str) -> str:
+        result = f"{prop} >= '{low}'"
+        if high is not None:
+            result += f" AND {prop} < '{high}'"
+        return f"({result})"
+
+    return f"@SQL=({date_range(p)} OR ({p} IS NULL AND {date_range(a)}))"
 
 
 def _history_candidates(
     rows: list[tuple[str, datetime | None]],
     *,
     since: datetime,
-    state: HistoryImportState,
+    resume_at: datetime | None,
 ) -> list[tuple[str, datetime | None]]:
-    """Resume in deterministic descending (timestamp, EntryID) order.
-
-    Old cursors used an unspecified Outlook order for equal dates. Replay
-    that whole boundary group once rather than risk skipping a message.
-    Subsequent cursors use the deterministic table ordering.
-    """
-    cursor_id = state.cursor_entry_id
-    cursor_time = state.cursor_timestamp
-    cursor_version = (getattr(state, "metadata_json", None) or {}).get(
-        _TABLE_CURSOR_KEY
-    )
-    current = next(
+    """Sort only one bounded date window, never the entire folder."""
+    return sorted(
         (
-            occurred_at
+            (entry_id, occurred_at)
             for entry_id, occurred_at in rows
-            if cursor_id and entry_id.casefold() == cursor_id.casefold()
+            if occurred_at is None
+            or (occurred_at >= since and (
+                resume_at is None or occurred_at <= resume_at
+            ))
         ),
-        None,
+        key=lambda row: (row[1] or _MIN_UTC, row[0].casefold()),
+        reverse=True,
     )
-    stable = cursor_version == _TABLE_CURSOR_VERSION
-    if current is not None and current != cursor_time:
-        # The source date changed or the legacy COM date differed.
-        # Revisit the more recent boundary conservatively.
-        cursor_time = max(current, cursor_time or _MIN_UTC)
-        stable = False
-    boundary = _history_order_key(cursor_id or "", cursor_time)
-    candidates = []
-    for entry_id, occurred_at in rows:
-        if occurred_at is not None and occurred_at < since:
-            continue
-        if cursor_id:
-            if stable:
-                if _history_order_key(entry_id, occurred_at) >= boundary:
-                    continue
-            elif cursor_time is not None and occurred_at is not None:
-                if occurred_at > cursor_time:
-                    continue
-        candidates.append((entry_id, occurred_at))
-    candidates.sort(
-        key=lambda row: _history_order_key(*row), reverse=True
-    )
-    return candidates
 
 
 def _require_history_entry_id(item: Any, spec: HistoricalFolder) -> str:
@@ -445,6 +507,156 @@ def _require_history_entry_id(item: Any, spec: HistoricalFolder) -> str:
         ) from exc
 
 
+def _same_outlook_entry(namespace: Any, left: str, right: str) -> bool:
+    # EntryID byte representations can differ for the same MAPI object.
+    return left.casefold() == right.casefold() or bool(
+        namespace.CompareEntryIDs(left, right)
+    )
+
+
+def _cursor_group_ids(state: HistoryImportState) -> tuple[str, ...]:
+    metadata = state.metadata_json or {}
+    if metadata.get(_TABLE_CURSOR_KEY) != _TABLE_CURSOR_VERSION:
+        return ()
+    ids = metadata.get(_TABLE_CURSOR_IDS_KEY)
+    if not isinstance(ids, list) or not all(
+        isinstance(value, str) and value for value in ids
+    ):
+        return ()
+    if state.cursor_entry_id not in ids:
+        return ()
+    return tuple(ids)
+
+
+def _record_history_cursor(
+    state: HistoryImportState, entry_id: str, occurred_at: datetime | None
+) -> None:
+    # Persist only long-term MailItem IDs, not possibly short-term table
+    # row IDs. Remember all committed IDs in the current exact timestamp
+    # group so equal dates cannot cause omissions or an endless replay.
+    previous = (
+        _cursor_group_ids(state)
+        if state.cursor_timestamp == occurred_at else ()
+    )
+    ids = list(dict.fromkeys((*previous, entry_id)))
+    state.cursor_entry_id = entry_id
+    state.cursor_timestamp = occurred_at
+    state.metadata_json = {
+        **(state.metadata_json or {}),
+        _TABLE_CURSOR_KEY: _TABLE_CURSOR_VERSION,
+        _TABLE_CURSOR_IDS_KEY: ids,
+    }
+
+
+def _is_mapi_not_found(exc: Exception) -> bool:
+    # pywintypes.com_error may wrap the MAPI HRESULT in EXCEPINFO.scode.
+    for value in (getattr(exc, "hresult", None), *exc.args):
+        if isinstance(value, tuple) and len(value) >= 6:
+            value = value[5]
+        if isinstance(value, int) and value & 0xFFFFFFFF == 0x8004010F:
+            return True
+    return False
+
+
+def _legacy_resume_at(
+    namespace: Any, spec: HistoricalFolder, state: HistoryImportState
+) -> datetime | None:
+    saved = _cursor_utc(state.cursor_timestamp)
+    if not state.cursor_entry_id or saved is None:
+        return None
+    # Old cursors may predate MAPI UTC columns. Reconcile the stored date
+    # with the live object's MAPI date once, without enumerating its folder.
+    try:
+        item = namespace.GetItemFromID(state.cursor_entry_id, spec.store_id)
+    except Exception as exc:
+        if not _is_mapi_not_found(exc):
+            raise
+        logger.warning("history_legacy_cursor_missing", folder=spec.folder_path)
+        return saved
+    values = item.PropertyAccessor.GetProperties((_TABLE_RECEIVED, _TABLE_SENT))
+    current = _effective_table_time(values[0], values[1], spec.date_attr)
+    return max(saved, current) if current is not None else saved
+
+
+def _read_history_window(
+    spec: HistoricalFolder,
+    lower: datetime | None,
+    upper: datetime | None,
+) -> tuple[Any, list[tuple[str, datetime | None]]]:
+    started = time.monotonic()
+    logger.info(
+        "history_table_window_started",
+        folder=spec.folder_path,
+        lower=lower.isoformat() if lower else None,
+        upper=upper.isoformat() if upper else None,
+        undated=lower is None,
+    )
+    table = spec.folder.GetTable(_history_filter(spec.date_attr, lower, upper))
+    table.Columns.RemoveAll()
+    for column in ("EntryID", _TABLE_RECEIVED, _TABLE_SENT):
+        table.Columns.Add(column)
+    rows: dict[str, tuple[str, datetime | None]] = {}
+    while not table.EndOfTable:
+        batch = table.GetArray(_TABLE_BATCH_SIZE)
+        if not batch:
+            raise OutlookFolderUnavailable("Outlook returned an empty table batch.")
+        for row in batch:
+            entry_id = _safe_text(row[0]).strip()
+            if not entry_id:
+                raise OutlookFolderUnavailable("Outlook table row has no EntryID.")
+            occurred_at = _effective_table_time(row[1], row[2], spec.date_attr)
+            if lower is None:
+                if occurred_at is not None:
+                    raise OutlookFolderUnavailable("Undated filter returned a dated row.")
+            elif occurred_at is None or occurred_at < lower or (
+                upper is not None and occurred_at >= upper
+            ):
+                raise OutlookFolderUnavailable("Outlook date filter returned an out-of-range row.")
+            key = entry_id.casefold()
+            previous = rows.get(key)
+            if previous is not None and previous[1] != occurred_at:
+                raise OutlookFolderUnavailable("Outlook table changed during enumeration.")
+            rows[key] = (entry_id, occurred_at)
+        logger.info(
+            "history_table_batch", folder=spec.folder_path, rows_scanned=len(rows),
+        )
+    logger.info(
+        "history_table_window_read",
+        folder=spec.folder_path,
+        rows_scanned=len(rows),
+        duration_seconds=round(time.monotonic() - started, 3),
+    )
+    # Keep the table alive while its row IDs are used by GetItemFromID.
+    return table, list(rows.values())
+
+
+def _yield_history_candidates(
+    namespace: Any,
+    spec: HistoricalFolder,
+    candidates: list[tuple[str, datetime | None]],
+    *,
+    checkpoint_time: datetime | None,
+    committed_ids: tuple[str, ...],
+) -> Iterator[tuple[Any, datetime | None]]:
+    known = {value.casefold() for value in committed_ids}
+    for entry_id, occurred_at in candidates:
+        at_checkpoint = occurred_at == checkpoint_time and bool(committed_ids)
+        if at_checkpoint and entry_id.casefold() in known:
+            continue
+        item = namespace.GetItemFromID(entry_id, spec.store_id)
+        if int(item.Class) != MAIL_ITEM_CLASS:
+            continue
+        live_id = _require_history_entry_id(item, spec)
+        if not _same_outlook_entry(namespace, entry_id, live_id):
+            raise OutlookFolderUnavailable("Outlook item identity changed.")
+        if at_checkpoint and (
+            live_id.casefold() in known
+            or any(_same_outlook_entry(namespace, live_id, old) for old in committed_ids)
+        ):
+            continue
+        yield item, occurred_at
+
+
 def _history_items(
     spec: HistoricalFolder,
     *,
@@ -452,72 +664,64 @@ def _history_items(
     state: HistoryImportState,
 ) -> Iterator[tuple[Any, datetime | None]]:
     if spec.folder is None:
-        raise OutlookFolderUnavailable(
-            f"Folder is not open: {spec.folder_path}"
-        )
-
-    # Scan lightweight metadata in bulk. Never instantiate every MailItem
-    # just to find the saved cursor. Avoid locale-dependent date filters
-    # and apply the exact UTC boundary locally, including missing dates.
+        raise OutlookFolderUnavailable(f"Folder is not open: {spec.folder_path}")
     try:
-        table = spec.folder.GetTable()
-        table.Columns.RemoveAll()
-        for column in ("EntryID", _TABLE_RECEIVED, _TABLE_SENT):
-            table.Columns.Add(column)
-
-        rows: dict[str, tuple[str, datetime | None]] = {}
-        while not table.EndOfTable:
-            batch = table.GetArray(_TABLE_BATCH_SIZE)
-            if not batch:
-                raise OutlookFolderUnavailable("Outlook returned an empty table batch.")
-            for row in batch:
-                entry_id = _safe_text(row[0]).strip()
-                if not entry_id:
-                    raise OutlookFolderUnavailable(
-                        "Outlook table row has no EntryID."
-                    )
-                received = _table_utc(row[1])
-                sent = _table_utc(row[2])
-                occurred_at = (
-                    (received or sent)
-                    if spec.date_attr == "ReceivedTime"
-                    else (sent or received)
-                )
-                key = entry_id.casefold()
-                previous = rows.get(key)
-                if previous is not None and previous[1] != occurred_at:
-                    raise OutlookFolderUnavailable(
-                        "Outlook table changed during enumeration."
-                    )
-                rows[key] = (entry_id, occurred_at)
-            logger.info(
-                "history_table_batch",
-                folder=spec.folder_path,
-                rows_scanned=len(rows),
-            )
-
-        candidates = _history_candidates(
-            list(rows.values()), since=since, state=state
+        namespace = spec.folder.Session
+        committed_ids = _cursor_group_ids(state)
+        checkpoint_time = _cursor_utc(state.cursor_timestamp)
+        resume_at = (
+            checkpoint_time if committed_ids
+            else _legacy_resume_at(namespace, spec, state)
         )
+        # A committed undated checkpoint follows all dated windows. A
+        # legacy null-date cursor has no reliable ordering: replay safely.
+        undated_only = bool(committed_ids) and checkpoint_time is None
+        since = since.astimezone(UTC)
+        oldest = _minute_floor(since)
+        upper = (
+            _minute_floor(resume_at) + timedelta(minutes=1)
+            if resume_at is not None else None
+        )
+        anchor = upper or (_minute_floor(datetime.now(UTC)) + timedelta(minutes=1))
+        span = _INITIAL_WINDOW
+
+        while not undated_only and anchor > oldest:
+            lower = max(oldest, anchor - span)
+            # Bounds are minute aligned for Outlook; exact cutoff and
+            # checkpoint are checked again in Python.
+            _table, rows = _read_history_window(spec, lower, upper)
+            candidates = _history_candidates(rows, since=since, resume_at=resume_at)
+            logger.info(
+                "history_table_ready", folder=spec.folder_path,
+                rows_scanned=len(rows), candidates=len(candidates),
+                resumed=bool(state.cursor_entry_id),
+            )
+            yield from _yield_history_candidates(
+                namespace, spec, candidates,
+                checkpoint_time=checkpoint_time, committed_ids=committed_ids,
+            )
+            # No older query until this window is exhausted. Reconnects
+            # start at the last committed date, not at the folder head.
+            upper = anchor = lower
+            if len(rows) < _TABLE_BATCH_SIZE:
+                span = min(span * 2, _MAX_WINDOW)
+            elif len(rows) > 4096:
+                span = max(span / 2, timedelta(days=1))
+
+        _table, rows = _read_history_window(spec, None, None)
+        candidates = _history_candidates(rows, since=since, resume_at=resume_at)
         logger.info(
-            "history_table_ready",
-            folder=spec.folder_path,
-            rows_scanned=len(rows),
-            candidates=len(candidates),
+            "history_table_ready", folder=spec.folder_path,
+            rows_scanned=len(rows), candidates=len(candidates),
             resumed=bool(state.cursor_entry_id),
         )
-        namespace = spec.folder.Session
-        for entry_id, occurred_at in candidates:
-            item = namespace.GetItemFromID(entry_id, spec.store_id)
-            if int(item.Class) != MAIL_ITEM_CLASS:
-                continue
-            live_id = _require_history_entry_id(item, spec)
-            if live_id.casefold() != entry_id.casefold():
-                raise OutlookFolderUnavailable("Outlook item identity changed.")
-            yield item, occurred_at
+        yield from _yield_history_candidates(
+            namespace, spec, candidates,
+            checkpoint_time=checkpoint_time, committed_ids=committed_ids,
+        )
     except Exception as exc:
-        # Never silently skip unreadable rows and mark a folder complete.
-        # The committed cursor remains available for a later retry.
+        # A bad filter or unreadable row is a paused import, never an
+        # apparently successful but incomplete folder.
         raise OutlookFolderUnavailable(
             f"Could not enumerate Outlook table for {spec.folder_path}: {exc}"
         ) from exc
@@ -569,7 +773,7 @@ def _get_state(
         state.metadata_json = {
             key: value
             for key, value in (state.metadata_json or {}).items()
-            if key != _TABLE_CURSOR_KEY
+            if key not in {_TABLE_CURSOR_KEY, _TABLE_CURSOR_IDS_KEY}
         }
         state.oldest_allowed_at = since
         state.last_error = None
@@ -883,10 +1087,11 @@ def import_history(
                     # read transaction before any remote COM enumeration.
                     session.commit()
                     last_progress = time.monotonic()
+                    folder_since = min(since, state.oldest_allowed_at or since)
 
                     for item, occurred_at in _resilient_history_items(
                         spec,
-                        since=since,
+                        since=folder_since,
                         state=state,
                     ):
                         if (
@@ -936,12 +1141,7 @@ def import_history(
                             ] += int(
                                 result["attachment_failed"]
                             )
-                            state.cursor_entry_id = entry_id
-                            state.cursor_timestamp = occurred_at
-                            state.metadata_json = {
-                                **(state.metadata_json or {}),
-                                _TABLE_CURSOR_KEY: _TABLE_CURSOR_VERSION,
-                            }
+                            _record_history_cursor(state, entry_id, occurred_at)
                             state.last_error = None
                             session.commit()
                         except Exception as exc:
@@ -1002,7 +1202,7 @@ def import_history(
 
                     if reached_folder_end:
                         state.status = "completed"
-                        state.oldest_allowed_at = since
+                        state.oldest_allowed_at = folder_since
                         totals["folders_completed"] += 1
                     else:
                         state.status = "paused"
