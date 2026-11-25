@@ -125,6 +125,10 @@ function Captured {
     if ($Exe -ne 'workmind-history-import.exe') {
         $proc = Start-Process @startParams -Wait
     } else {
+        # Launch the actual Python module, bypassing the Windows console
+        # entry-point executable; unbuffered output feeds the watchdog.
+        $startParams.FilePath = $Python
+        $startParams.ArgumentList = @('-u', '-m', 'apps.history_importer.main') + $CliArgs
         # A COM call can block forever without raising a Python exception.
         # Watch actual log activity, not total elapsed import duration.
         $proc = Start-Process @startParams
@@ -248,22 +252,37 @@ try {
     for ($pass = 1; $pass -le 10000; $pass++) {
         if (Check-Stop) { return }
         Log ('=== MAIL HISTORY PASS ' + $pass + ' ===')
+        $passStarted = [DateTimeOffset]::UtcNow
         Retry-Task -Exe 'workmind-history-import.exe' -CliArgs @(
             '--years', '5', '--max-messages', [string]$BatchMessages,
             '--index', '--max-index-batches', '10000'
         ) -Label ('mail-' + $pass)
 
         $history = Get-Content -LiteralPath $HistoryStatus -Raw -Encoding UTF8 | ConvertFrom-Json
+        if (-not $history.started_at -or
+            [DateTimeOffset]::Parse([string]$history.started_at) -lt $passStarted.AddSeconds(-1) -or
+            [int]$history.max_messages -ne $BatchMessages) {
+            throw 'History status is stale or belongs to another run.'
+        }
         if ($history.status -notin @('paused', 'completed')) {
             throw ('Unexpected history status: ' + $history.status)
         }
         if ([int]$history.totals.failed -gt 0) { throw 'Mail importer reported failed items.' }
+        if ($null -eq $history.indexing -or [int]$history.indexing.failed -gt 0) {
+            throw 'Mail indexing failed or did not report its result.'
+        }
+        if ([int]$history.totals.attachment_failed -gt 0) {
+            Log ('WARNING: attachments failed to save: ' + $history.totals.attachment_failed)
+        }
         if ($history.status -eq 'paused' -and [int]$history.totals.seen -eq 0) {
             throw 'Mail importer did not advance.'
         }
         Log ('Mail status=' + $history.status + ' seen=' + $history.totals.seen + ' created=' + $history.totals.created)
         Retry-Task -Exe 'workmind-index-admin.exe' -CliArgs @('check') -Label ('index-' + $pass)
         if ($history.status -eq 'completed') {
+            if (-not $history.indexing.queue_drained) {
+                throw ('Mail collection completed but indexing jobs remain: ' + ($history.indexing.queue_remaining | ConvertTo-Json -Compress))
+            }
             $finishedMail = $true
             break
         }
@@ -285,6 +304,14 @@ try {
         $property = $queue.jobs.PSObject.Properties[$state]
         if ($null -ne $property -and [int]$property.Value -gt 0) {
             throw ('Attachment jobs remain ' + $state + ': ' + $property.Value)
+        }
+    }
+    # A failed Outlook attachment save has no worker job. Checking jobs
+    # alone cannot establish attachment completion.
+    foreach ($state in @('new', 'queued', 'processing', 'error', 'missing', 'missing_parent')) {
+        $property = $queue.attachments.PSObject.Properties[$state]
+        if ($null -ne $property -and [int]$property.Value -gt 0) {
+            throw ('Attachment rows require attention ' + $state + ': ' + $property.Value)
         }
     }
     Retry-Task -Exe 'workmind-index-admin.exe' -CliArgs @('check') -Label 'index-final'
