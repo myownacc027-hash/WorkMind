@@ -425,6 +425,26 @@ def _history_candidates(
     return candidates
 
 
+def _require_history_entry_id(item: Any, spec: HistoricalFolder) -> str:
+    """An unreadable mail identity must never be skipped past the cursor."""
+    try:
+        entry_id = _safe_text(getattr(item, "EntryID", "")).strip()
+        if not entry_id:
+            raise ValueError("Outlook item has no EntryID.")
+        return entry_id
+    except Exception as exc:
+        logger.warning(
+            "history_item_unsupported",
+            store=spec.store_display_name,
+            folder=spec.folder_path,
+            action="retry",
+            error=str(exc),
+        )
+        raise OutlookFolderUnavailable(
+            f"Could not read EntryID in {spec.folder_path}: {exc}"
+        ) from exc
+
+
 def _history_items(
     spec: HistoricalFolder,
     *,
@@ -489,9 +509,9 @@ def _history_items(
         namespace = spec.folder.Session
         for entry_id, occurred_at in candidates:
             item = namespace.GetItemFromID(entry_id, spec.store_id)
-            if int(getattr(item, "Class", 0)) != MAIL_ITEM_CLASS:
+            if int(item.Class) != MAIL_ITEM_CLASS:
                 continue
-            live_id = _safe_text(getattr(item, "EntryID", "")).strip()
+            live_id = _require_history_entry_id(item, spec)
             if live_id.casefold() != entry_id.casefold():
                 raise OutlookFolderUnavailable("Outlook item identity changed.")
             yield item, occurred_at
@@ -881,18 +901,7 @@ def import_history(
                         totals["seen"] += 1
                         state.seen_count += 1
 
-                        try:
-                            entry_id = _safe_text(
-                                getattr(item, "EntryID", "")
-                            ).strip()
-                        except Exception as exc:
-                            raise OutlookFolderUnavailable(
-                                f"Could not read EntryID in {spec.folder_path}: {exc}"
-                            ) from exc
-                        if not entry_id:
-                            raise OutlookFolderUnavailable(
-                                f"Outlook item has no EntryID in {spec.folder_path}"
-                            )
+                        entry_id = _require_history_entry_id(item, spec)
 
                         try:
                             result = ingest_mail_item(
