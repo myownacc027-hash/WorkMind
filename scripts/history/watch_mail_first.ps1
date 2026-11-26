@@ -13,6 +13,7 @@ $runDir = Join-Path $DataDir 'run'
 $resultFile = Join-Path $runDir 'history-full-result.txt'
 $statusFile = Join-Path $runDir 'history-import-status.json'
 $samples = @{}
+$inventorySamples = [System.Collections.Generic.List[object]]::new()
 $currentSession = ''
 
 function Format-RunnerState {
@@ -62,6 +63,10 @@ function Format-EventLine {
         'history_table_ready' { "$time - Метаданные готовы: $($Event.candidates) кандидатов." }
         'history_message_progress' { "$time - Обработано писем: $($Event.seen), новых: $($Event.created)." }
         'history_indexing_started' { "$time - Начата индексация писем." }
+        'history_inventory_folder_started' { "$time - Подсчёт папки: $($Event.folder)." }
+        'history_inventory_progress' { "$time - Подсчитано кандидатов: $($Event.remaining)." }
+        'history_inventory_folder_finished' { "$time - Подсчёт папки завершён: $($Event.remaining)." }
+        'history_inventory_completed' { "$time - Подсчёт завершён: папок $($Event.folders), остаток $($Event.remaining)." }
         'processing_batch_completed' { "$time - Обработано заданий: $($Event.jobs), чанков: $($Event.chunks)." }
         'history_index_batch' { "$time - Пакет $($Event.batch): взято $($Event.claimed), выполнено $($Event.completed)." }
         'outlook_text_normalized' { "$time - Исправлена некорректная кодировка текста Outlook ($($Event.reason))." }
@@ -99,6 +104,7 @@ SELECT json_build_object(
   'folders', COALESCE((
     SELECT json_agg(json_build_object(
       'id', id, 'mailbox_id', mailbox_id, 'store', store_display_name,
+      'store_id', outlook_store_id, 'folder_id', folder_entry_id,
       'folder', folder_path, 'status', status, 'seen', seen_count,
       'created', created_count, 'failed', failed_count,
       'has_error', last_error IS NOT NULL,
@@ -232,6 +238,135 @@ function Show-FolderEstimate {
     }
 }
 
+function Show-InventoryProgress {
+    param($Db, $HistoryStatus, [string] $Directory, [bool] $Active)
+    $path = Join-Path $Directory 'history-inventory.json'
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        Write-Host 'Общий объём: инвентаризация в этом сеансе не выполнялась.'
+        return
+    }
+    try {
+        $inventory = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($inventory.version -ne 1 -or $inventory.run_id -ne (Split-Path -Leaf $Directory) -or
+            $inventory.mode -notin @('metadata_candidates', 'verified_mail')) {
+            throw 'Неподдерживаемый или чужой снимок инвентаризации.'
+        }
+        Write-Host ('Подсчёт выполнен: ' + ([DateTimeOffset]::Parse([string]$inventory.finished_at)).ToLocalTime().ToString('dd.MM.yyyy HH:mm:ss'))
+        $mode = if ($inventory.mode -eq 'verified_mail') { 'проверенные MailItem' } else { 'кандидаты по метаданным, возможны другие типы элементов' }
+        Write-Host "Режим подсчёта: $mode"
+        Write-Host "Остаток на момент подсчёта: $($inventory.remaining_at_snapshot)"
+        if ($null -eq $Db -or $null -eq $HistoryStatus -or -not $HistoryStatus.since) {
+            throw 'Не удалось прочитать текущие состояния импорта.'
+        }
+        if ($HistoryStatus.primary_store -ne $inventory.primary_store -or
+            $HistoryStatus.archive_store -ne $inventory.archive_store -or
+            [DateTimeOffset]::Parse([string]$HistoryStatus.since) -ne [DateTimeOffset]::Parse([string]$inventory.since)) {
+            throw 'Текущий проход ещё не использует область и границу этого подсчёта.'
+        }
+        $discovered = [int]$HistoryStatus.totals.folders_discovered
+        $planRows = @($inventory.folders)
+        if ($planRows.Count -eq 0 -or ($discovered -gt 0 -and $discovered -ne $planRows.Count)) {
+            throw 'Состав папок изменился после подсчёта.'
+        }
+        $lookup = @{}
+        foreach ($row in @($Db.folders)) {
+            $key = ([string]$row.store_id) + '|' + ([string]$row.folder_id)
+            if ($lookup.ContainsKey($key)) { throw 'Неоднозначное состояние папки.' }
+            $lookup[$key] = $row
+        }
+        $seen = [long]0
+        $created = [long]0
+        $remaining = [long]0
+        $baseline = [long]0
+        $planned = [long]0
+        $reconciled = [long]0
+        $completeCount = 0
+        $keys = @{}
+        $storeIds = @{}
+        foreach ($plan in $planRows) {
+            $key = ([string]$plan.store_id) + '|' + ([string]$plan.folder_id)
+            if ($keys.ContainsKey($key) -or [long]$plan.remaining -lt 0) {
+                throw 'Некорректный план по папкам.'
+            }
+            $keys[$key] = $true
+            $storeIds[[string]$plan.store_id] = $true
+            $baseline += [long]$plan.seen
+            $planned += [long]$plan.seen + [long]$plan.remaining
+            $row = $lookup[$key]
+            if ($null -eq $row) {
+                if ($null -ne $plan.state_id) { throw 'Сохранённое состояние папки исчезло.' }
+                $remaining += [long]$plan.remaining
+                continue
+            }
+            if ($null -ne $plan.state_id -and $row.id -ne $plan.state_id) {
+                throw 'Сохранённое состояние папки изменилось.'
+            }
+            if ($null -ne $row.cutoff -and [math]::Abs([long]$row.cutoff - [long]$plan.cutoff) -gt 1) {
+                throw 'Граница импорта папки изменилась.'
+            }
+            $delta = [long]$row.seen - [long]$plan.seen
+            if ($delta -lt 0 -or [long]$row.failed -gt [long]$plan.failed -or ($plan.completed -and $row.status -ne 'completed')) {
+                throw 'Состояние папки сброшено или возникли новые ошибки.'
+            }
+            if ($delta -gt [long]$plan.remaining) {
+                throw 'Фактическое число элементов превысило подсчёт; нужна новая инвентаризация.'
+            }
+            $seen += [long]$row.seen
+            $created += [long]$row.created
+            if ($row.status -eq 'completed') {
+                $completeCount++
+                $reconciled += [long]$plan.remaining - $delta
+            } else {
+                $remaining += [long]$plan.remaining - $delta
+            }
+        }
+        # Old states outside the live roster may legitimately exist. A new or
+        # newly touched state outside the snapshot indicates scope drift.
+        $snapshotEpoch = ([DateTimeOffset]::Parse([string]$inventory.started_at)).ToUnixTimeSeconds()
+        foreach ($row in @($Db.folders)) {
+            $key = ([string]$row.store_id) + '|' + ([string]$row.folder_id)
+            if ($storeIds.ContainsKey([string]$row.store_id) -and -not $keys.ContainsKey($key) -and
+                [long]$row.updated -gt $snapshotEpoch) {
+                throw 'Появилось состояние папки вне плана.'
+            }
+        }
+        $total = $seen + $remaining
+        Write-Host "Плановый объём на момент подсчёта: $planned"
+        Write-Host "Обработано исходных элементов (счётчики истории): $seen"
+        Write-Host "Создано уникальных писем (счётчики истории): $created"
+        Write-Host "Осталось по снимку: $remaining"
+        Write-Host "Завершено папок по плану: $completeCount из $($planRows.Count)"
+        if ($reconciled -gt 0) {
+            Write-Host "Уточнено после завершения папок (не обработано из плана): $reconciled"
+        }
+        if ($total -gt 0) {
+            Write-Host ('Общий прогресс по уточнённому плану: {0:N1}%' -f (100.0 * $seen / $total)) -ForegroundColor Green
+        }
+        if ($remaining -eq 0) {
+            Write-Host 'По снимку элементов больше нет; ожидаются завершение папок и проверка индекса.'
+        }
+        $nowEpoch = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+        $inventorySamples.Add([pscustomobject]@{ At = $nowEpoch; Seen = $seen })
+        while ($inventorySamples.Count -gt 1 -and ($nowEpoch - $inventorySamples[0].At) -gt 3600) {
+            $inventorySamples.RemoveAt(0)
+        }
+        $first = $inventorySamples[0]
+        $elapsed = $nowEpoch - $first.At
+        $advance = $seen - $first.Seen
+        if ($Active -and $remaining -gt 0 -and $elapsed -ge 300 -and $advance -ge 100) {
+            $eta = $remaining * $elapsed / $advance
+            Write-Host ('Осталось времени на историческую почту (оценка): ' + (Format-Duration $eta))
+            Write-Host 'Прогноз по недавней сквозной скорости; обработка содержимого вложений не включена.'
+        } elseif ($remaining -gt 0) {
+            Write-Host 'Общий прогноз времени: накопление статистики.'
+        }
+        Write-Host 'Снимок не учитывает последующие изменения Outlook; точность остатка зависит от режима подсчёта.'
+    } catch {
+        $inventorySamples.Clear()
+        Write-Host ('Общий прогноз по инвентаризации недоступен: ' + $_.Exception.Message) -ForegroundColor Yellow
+    }
+}
+
 while ($true) {
     try {
         Clear-Host
@@ -249,6 +384,7 @@ while ($true) {
         $dir = $runnerResult.Directory
         if ($dir -ne $currentSession) {
             $samples = @{}
+            $inventorySamples.Clear()
             $currentSession = $dir
         }
         Write-Host "Каталог журнала: $dir"
@@ -337,7 +473,7 @@ while ($true) {
                     Write-Host "Текущая папка: $($activeFolder[0].folder)"
                     Show-FolderEstimate $activeFolder[0] ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds()) $stageActive $other
                 }
-                Write-Host 'Точный остаток и время завершения всего архива пока неизвестны.'
+                Show-InventoryProgress $db $status $dir $stageActive
             } else {
                 Write-Host 'Не удалось однозначно определить область исторического импорта.' -ForegroundColor Yellow
             }
@@ -349,7 +485,17 @@ while ($true) {
         if ($runners.Count -eq 0) {
             Write-Host "СОСТОЯНИЕ: управляющий процесс не запущен ($(Format-RunnerState $runnerResult.State))" -ForegroundColor Yellow
         } elseif ($null -eq $file -or $children.Count -eq 0) {
-            Write-Host 'СОСТОЯНИЕ: управляющий процесс работает (запуск / проверка / повтор)' -ForegroundColor Cyan
+            $inventoryLog = Join-Path $dir 'inventory.stdout.log'
+            $inventoryChildren = @($processes | Where-Object {
+                $_.Name -eq 'python.exe' -and $_.ParentProcessId -in $runnerIds -and
+                $_.CommandLine -match 'apps\.history_importer\.inventory'
+            })
+            if ($inventoryChildren.Count -gt 0 -and (Test-Path -LiteralPath $inventoryLog -PathType Leaf)) {
+                Write-Host 'СОСТОЯНИЕ: выполняется предварительный подсчёт писем' -ForegroundColor Cyan
+                @(Read-Events -Path $inventoryLog) | Select-Object -Last 3 | ForEach-Object { Write-Host (Format-EventLine $_) }
+            } else {
+                Write-Host 'СОСТОЯНИЕ: управляющий процесс работает (запуск / проверка / повтор)' -ForegroundColor Cyan
+            }
         } else {
             Write-Host "=== ПРОХОД $pass / $($file.Name) ===" -ForegroundColor Cyan
             Write-Host "Последняя запись: $($file.LastWriteTime)"
