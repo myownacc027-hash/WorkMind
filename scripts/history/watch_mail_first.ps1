@@ -277,7 +277,6 @@ function Show-InventoryProgress {
         $seen = [long]0
         $created = [long]0
         $remaining = [long]0
-        $baseline = [long]0
         $planned = [long]0
         $reconciled = [long]0
         $completeCount = 0
@@ -290,7 +289,6 @@ function Show-InventoryProgress {
             }
             $keys[$key] = $true
             $storeIds[[string]$plan.store_id] = $true
-            $baseline += [long]$plan.seen
             $planned += [long]$plan.seen + [long]$plan.remaining
             $row = $lookup[$key]
             if ($null -eq $row) {
@@ -333,7 +331,7 @@ function Show-InventoryProgress {
         $total = $seen + $remaining
         Write-Host "Плановый объём на момент подсчёта: $planned"
         Write-Host "Обработано исходных элементов (счётчики истории): $seen"
-        Write-Host "Создано уникальных писем (счётчики истории): $created"
+        Write-Host "Новых писем по накопленным счётчикам: $created"
         Write-Host "Осталось по снимку: $remaining"
         Write-Host "Завершено папок по плану: $completeCount из $($planRows.Count)"
         if ($reconciled -gt 0) {
@@ -343,7 +341,7 @@ function Show-InventoryProgress {
             Write-Host ('Общий прогресс по уточнённому плану: {0:N1}%' -f (100.0 * $seen / $total)) -ForegroundColor Green
         }
         if ($remaining -eq 0) {
-            Write-Host 'По снимку элементов больше нет; ожидаются завершение папок и проверка индекса.'
+            Write-Host 'По снимку элементов больше нет; могут остаться проверка папок, индексация писем и проверка индекса.'
         }
         $nowEpoch = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
         $inventorySamples.Add([pscustomobject]@{ At = $nowEpoch; Seen = $seen })
@@ -473,13 +471,13 @@ while ($true) {
                     Write-Host "Текущая папка: $($activeFolder[0].folder)"
                     Show-FolderEstimate $activeFolder[0] ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds()) $stageActive $other
                 }
-                Show-InventoryProgress $db $status $dir $stageActive
             } else {
                 Write-Host 'Не удалось однозначно определить область исторического импорта.' -ForegroundColor Yellow
             }
         } else {
             Write-Host 'Не удалось прочитать состояние базы или исторического импорта.' -ForegroundColor Yellow
         }
+        Show-InventoryProgress $db $status $dir $stageActive
 
         Write-Host ''
         if ($runners.Count -eq 0) {
