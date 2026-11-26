@@ -20,6 +20,7 @@ from apps.outlook_collector.outlook import (
     MAIL_ITEM_CLASS,
     _folder_entry_id,
     _folder_path,
+    _identity_text,
     _safe_text,
     _to_utc,
     connect_outlook,
@@ -180,7 +181,7 @@ def _folder_specs(
         store.DisplayName
     ).strip()
     store_id = (
-        _safe_text(
+        _identity_text(
             getattr(store, "StoreID", "")
         ).strip()
         or f"display:{display_name}"
@@ -495,7 +496,7 @@ def _history_candidates(
 def _require_history_entry_id(item: Any, spec: HistoricalFolder) -> str:
     """An unreadable mail identity must never be skipped past the cursor."""
     try:
-        entry_id = _safe_text(getattr(item, "EntryID", "")).strip()
+        entry_id = _identity_text(getattr(item, "EntryID", "")).strip()
         if not entry_id:
             raise ValueError("Outlook item has no EntryID.")
         return entry_id
@@ -606,7 +607,7 @@ def _read_history_window(
         if not batch:
             raise OutlookFolderUnavailable("Outlook returned an empty table batch.")
         for row in batch:
-            entry_id = _safe_text(row[0]).strip()
+            entry_id = _identity_text(row[0]).strip()
             if not entry_id:
                 raise OutlookFolderUnavailable("Outlook table row has no EntryID.")
             occurred_at = _effective_table_time(row[1], row[2], spec.date_attr)
@@ -1053,7 +1054,7 @@ def import_history(
                 or primary_store
             )
             primary_store_id = (
-                _safe_text(
+                _identity_text(
                     getattr(primary, "StoreID", "")
                 ).strip()
                 or f"display:{primary_store}"
@@ -1186,7 +1187,7 @@ def import_history(
                                 reset=False,
                             )
                             state.failed_count += 1
-                            state.last_error = str(exc)
+                            state.last_error = _safe_text(exc)
                             totals["failed"] += 1
                             reached_folder_end = False
                             session.commit()
@@ -1310,7 +1311,7 @@ def import_history(
             **base_status,
             "status": "paused",
             "reason": "outlook_temporarily_unavailable",
-            "error": str(exc),
+            "error": _safe_text(exc),
             "finished_at": now_iso(),
             "duration_seconds": round(
                 time.monotonic()
