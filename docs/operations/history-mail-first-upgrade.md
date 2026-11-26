@@ -85,3 +85,59 @@ needs a separate design and benchmarks.
 - While a worker operates, database/Qdrant counts can differ temporarily.
   Validate full consistency after workers stop.
 - Mail import completed does not mean all attachments have been indexed.
+
+## Optional inventory and overall progress
+
+Do not install this change or run an inventory while a prior history runner
+is active. The monitor alone may be extracted to a temporary directory and
+run without replacing the deployed source files.
+
+On a future, idle and tested deployment, add one of the following parameters
+to the normal mail-first runner command:
+
+- `-InventoryMode Metadata`: count remaining table candidates in the live
+  folder roster, using the same date-window filters and persisted cursor
+  groups as the importer. It does not open mail bodies or save attachments.
+  The checkpoint group may require identity verification. Other Outlook item
+  types may be included, so this is a candidate estimate, not an exact
+  count of MailItems.
+- `-InventoryMode VerifyMail`: also open each candidate to verify its
+  Outlook Class and canonical EntryID using the importer's acceptance logic.
+  This is slower, but counts eligible MailItems at scan time. It does not
+  explicitly read message bodies or download attachment contents.
+
+Default `-InventoryMode None` preserves the existing execution path. The
+runner performs the optional inventory once, before its first mail pass,
+under the same Outlook operation lock and idle watchdog. If the scan fails,
+it logs a warning and uses the usual import arguments. It must not continue
+if a timed-out process could not be confirmed terminated. No history states,
+CAS or Qdrant data are changed by the inventory.
+
+After a successful scan, use the same fixed five-year cutoff for all passes
+in the runner session. Already completed folders retain their existing
+coverage; active older cutoffs are preserved. The fixed cutoff refuses any
+operation that would reset an existing cursor. It cannot be combined with
+`--reset`.
+
+The inventory writes one atomic `history-inventory.json` file inside the
+runner's own log directory. It contains the observed folder roster, per-folder
+baseline counters, effective cutoff and remaining candidates. It is local
+operational data, not a repository file or a new database schema. An
+incomplete scan must not be presented as a complete count.
+
+Run the read-only Russian monitor in a second PowerShell window:
+
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\history\watch_mail_first.ps1 -DataDir "<WORKMIND_HOME>" -RefreshSeconds 15
+
+The monitor uses the authoritative session path in `history-full-result.txt`,
+reads committed folder counters and outstanding email jobs via a read-only
+PostgreSQL transaction, and combines the inventory baseline with subsequent
+progress. It reports the initial plan, remaining work, reconciled completed
+folders and a time estimate based on recent elapsed throughput. It rejects
+incompatible cutoffs, disappeared states, new failures and detected scope
+drift. Exchange is not frozen by this snapshot: new, moved or deleted items
+may change counts, and prior counter replays need not equal unique emails.
+Dedupe results cannot be known exactly until import. Attachment content
+processing is a separate phase; neither the mail count nor its ETA includes
+that phase. Existing sessions without inventory retain the previous folder
+date estimate and do not fabricate an overall count.
