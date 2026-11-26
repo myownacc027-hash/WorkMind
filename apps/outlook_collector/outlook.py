@@ -64,9 +64,38 @@ class OutlookCollectorError(RuntimeError):
 
 
 def _safe_text(value: object) -> str:
+    """Normalize Outlook UTF-16 strings before hashing, storage and indexing.
+
+    COM can expose UTF-16 surrogate code units in a Python string. Decode
+    valid pairs losslessly; replace only unpaired units and PostgreSQL-
+    incompatible NULs. Valid Unicode is returned unchanged.
+    """
     if value is None:
         return ""
-    return str(value)
+    text = str(value)
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        text = text.encode("utf-16-le", errors="surrogatepass").decode(
+            "utf-16-le", errors="replace"
+        )
+        logger.warning("outlook_text_normalized", reason="utf16_surrogates")
+    if "\x00" in text:
+        text = text.replace("\x00", "\ufffd")
+        logger.warning("outlook_text_normalized", reason="embedded_nul")
+    return text
+
+
+def _identity_text(value: object) -> str:
+    """Never silently alter opaque MAPI identities used for lookup/cursors."""
+    text = "" if value is None else str(value)
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise OutlookCollectorError("Invalid Unicode in Outlook identity.") from exc
+    if "\x00" in text:
+        raise OutlookCollectorError("Embedded NUL in Outlook identity.")
+    return text
 
 
 def _safe_filename(filename: str) -> str:
@@ -178,7 +207,7 @@ def _folder_path(folder: Any) -> str:
 
 def _folder_entry_id(folder: Any) -> str | None:
     try:
-        return _safe_text(folder.EntryID).strip() or None
+        return _identity_text(folder.EntryID).strip() or None
     except Exception:
         return None
 
@@ -296,7 +325,7 @@ def _raw_payload(
     recipients: list[dict],
 ) -> dict:
     return {
-        "outlook_entry_id": _safe_text(
+        "outlook_entry_id": _identity_text(
             getattr(item, "EntryID", "")
         ),
         "internet_message_id": _property(
@@ -307,7 +336,7 @@ def _raw_payload(
             getattr(item, "ConversationID", "")
         ).strip()
         or None,
-        "folder_path": folder_path,
+        "folder_path": _safe_text(folder_path),
         "subject": _safe_text(
             getattr(item, "Subject", "")
         ),
@@ -737,7 +766,7 @@ def ingest_mail_item(
                         size_bytes=None,
                         mime_type=None,
                         processing_status="error",
-                        last_error=str(exc),
+                        last_error=_safe_text(exc),
                         metadata_json={
                             "outlook_index": index,
                             "save_error": True,
@@ -852,7 +881,7 @@ def collect_mail(
         getattr(store, "DisplayName", "")
     ).strip()
     store_id = (
-        _safe_text(
+        _identity_text(
             getattr(store, "StoreID", "")
         ).strip()
         or f"display:{store_display_name}"
