@@ -263,7 +263,6 @@ try {
     if ($InventoryMode -ne 'None') {
         if (Check-Stop) { return }
         $sinceAt = [DateTimeOffset]::UtcNow.AddDays(-1826).ToString('o', [Globalization.CultureInfo]::InvariantCulture)
-        $historyArgs += @('--since-at', $sinceAt)
         $mode = if ($InventoryMode -eq 'VerifyMail') { 'verify-mail' } else { 'metadata' }
         Log ('=== MAIL INVENTORY (' + $mode + ') ===')
         try {
@@ -275,6 +274,7 @@ try {
             if (-not (Test-Path -LiteralPath (Join-Path $SessionDir 'history-inventory.json') -PathType Leaf)) {
                 throw 'Inventory snapshot is missing.'
             }
+            $historyArgs += @('--since-at', $sinceAt)
             Log 'Inventory snapshot saved.'
         } catch {
             if ($_.Exception.Message -like 'Mail watchdog could not verify*') { throw }
