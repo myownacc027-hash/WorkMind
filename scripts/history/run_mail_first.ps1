@@ -12,6 +12,8 @@ param(
     [int] $MinFreeGB = 100,
     [ValidateRange(60, 86400)]
     [int] $MailIdleTimeoutSeconds = 600,
+    [ValidateSet('None', 'Metadata', 'VerifyMail')]
+    [string] $InventoryMode = 'None',
     [switch] $MailOnly
 )
 
@@ -122,13 +124,18 @@ function Captured {
         RedirectStandardOutput = $outFile
         RedirectStandardError = $errFile
     }
-    if ($Exe -ne 'workmind-history-import.exe') {
+    if ($Exe -notin @('workmind-history-import.exe', 'workmind-history-inventory')) {
         $proc = Start-Process @startParams -Wait
     } else {
         # Launch the actual Python module, bypassing the Windows console
         # entry-point executable; unbuffered output feeds the watchdog.
         $startParams.FilePath = $Python
-        $startParams.ArgumentList = @('-u', '-m', 'apps.history_importer.main') + $CliArgs
+        $module = if ($Exe -eq 'workmind-history-inventory') {
+            'apps.history_importer.inventory'
+        } else {
+            'apps.history_importer.main'
+        }
+        $startParams.ArgumentList = @('-u', '-m', $module) + $CliArgs
         # A COM call can block forever without raising a Python exception.
         # Watch actual log activity, not total elapsed import duration.
         $proc = Start-Process @startParams
@@ -142,7 +149,7 @@ function Captured {
                 $lastSignature = $signature
                 $lastProgress = [DateTime]::UtcNow
             }
-            if (-not $indexingStarted) {
+            if ($Exe -eq 'workmind-history-import.exe' -and -not $indexingStarted) {
                 $recent = @(Get-Content -LiteralPath $outFile -Tail 20 -Encoding UTF8)
                 $indexingStarted = [bool]($recent -match '"event"\s*:\s*"history_index(ing_started|_batch)"')
             }
@@ -248,15 +255,39 @@ try {
     Backup-Checkpoint
     Retry-Task -Exe 'workmind-index-admin.exe' -CliArgs @('check') -Label 'initial-index-check'
 
+    # Optional one-time snapshot before the first mail pass. The same cutoff
+    # is used throughout this session so the inventory cannot drift simply
+    # because a later pass starts on another day. No change to default runs.
+    $historyArgs = @('--years', '5', '--max-messages', [string]$BatchMessages,
+        '--index', '--max-index-batches', '10000')
+    if ($InventoryMode -ne 'None') {
+        if (Check-Stop) { return }
+        $sinceAt = [DateTimeOffset]::UtcNow.AddDays(-1826).ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+        $historyArgs += @('--since-at', $sinceAt)
+        $mode = if ($InventoryMode -eq 'VerifyMail') { 'verify-mail' } else { 'metadata' }
+        Log ('=== MAIL INVENTORY (' + $mode + ') ===')
+        try {
+            $code = Captured -Exe 'workmind-history-inventory' -CliArgs @(
+                '--run-id', (Split-Path -Leaf $SessionDir),
+                '--since-at', $sinceAt, '--mode', $mode
+            ) -Label 'inventory'
+            if ($code -ne 0) { throw ('Inventory exited with code ' + $code) }
+            if (-not (Test-Path -LiteralPath (Join-Path $SessionDir 'history-inventory.json') -PathType Leaf)) {
+                throw 'Inventory snapshot is missing.'
+            }
+            Log 'Inventory snapshot saved.'
+        } catch {
+            if ($_.Exception.Message -like 'Mail watchdog could not verify*') { throw }
+            Log ('WARNING: Inventory unavailable; continuing mail import without overall count. ' + $_.Exception.Message)
+        }
+    }
+
     $finishedMail = $false
     for ($pass = 1; $pass -le 10000; $pass++) {
         if (Check-Stop) { return }
         Log ('=== MAIL HISTORY PASS ' + $pass + ' ===')
         $passStarted = [DateTimeOffset]::UtcNow
-        Retry-Task -Exe 'workmind-history-import.exe' -CliArgs @(
-            '--years', '5', '--max-messages', [string]$BatchMessages,
-            '--index', '--max-index-batches', '10000'
-        ) -Label ('mail-' + $pass)
+        Retry-Task -Exe 'workmind-history-import.exe' -CliArgs $historyArgs -Label ('mail-' + $pass)
 
         $history = Get-Content -LiteralPath $HistoryStatus -Raw -Encoding UTF8 | ConvertFrom-Json
         if (-not $history.started_at -or
