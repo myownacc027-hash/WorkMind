@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -45,18 +46,26 @@ def count_remaining(
         checkpoint if committed_ids else history._legacy_resume_at(namespace, spec, state)
     )
     count = 0
+    last_progress = time.monotonic()
+
+    def count_verified(rows: list[tuple[str, datetime | None]]) -> None:
+        nonlocal count, last_progress
+        for _ in history._yield_history_candidates(
+            namespace, spec, rows,
+            checkpoint_time=checkpoint, committed_ids=committed_ids,
+        ):
+            count += 1
+            if time.monotonic() - last_progress >= 30:
+                logger.info("history_inventory_progress", folder=spec.folder_path, remaining=count)
+                last_progress = time.monotonic()
+
     for _table, candidates in history._history_windows(
         spec, since=since, resume_at=resume_at,
         undated_only=bool(committed_ids) and checkpoint is None,
         resumed=bool(state.cursor_entry_id),
     ):
         if verify_mail:
-            count += sum(
-                1 for _ in history._yield_history_candidates(
-                    namespace, spec, candidates,
-                    checkpoint_time=checkpoint, committed_ids=committed_ids,
-                )
-            )
+            count_verified(candidates)
         else:
             # Only open the checkpoint group, where canonical EntryID checks
             # are needed to exclude already-committed aliases. Elsewhere count
@@ -67,12 +76,7 @@ def count_remaining(
                     boundary.append(row)
                 else:
                     count += 1
-            count += sum(
-                1 for _ in history._yield_history_candidates(
-                    namespace, spec, boundary,
-                    checkpoint_time=checkpoint, committed_ids=committed_ids,
-                )
-            )
+            count_verified(boundary)
         logger.info("history_inventory_progress", folder=spec.folder_path, remaining=count)
     return count
 
