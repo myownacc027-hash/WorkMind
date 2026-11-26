@@ -678,6 +678,49 @@ def _yield_history_candidates(
         yield item, occurred_at
 
 
+def _history_windows(
+    spec: HistoricalFolder,
+    *,
+    since: datetime,
+    resume_at: datetime | None,
+    undated_only: bool,
+    resumed: bool,
+) -> Iterator[tuple[Any, list[tuple[str, datetime | None]]]]:
+    """Shared date-window traversal for collection and read-only inventory."""
+    since = since.astimezone(UTC)
+    oldest = _minute_floor(since)
+    upper = (
+        _minute_floor(resume_at) + timedelta(minutes=1)
+        if resume_at is not None else None
+    )
+    anchor = upper or (_minute_floor(datetime.now(UTC)) + timedelta(minutes=1))
+    span = _INITIAL_WINDOW
+
+    while not undated_only and anchor > oldest:
+        lower = max(oldest, anchor - span)
+        table, rows = _read_history_window(spec, lower, upper)
+        candidates = _history_candidates(rows, since=since, resume_at=resume_at)
+        logger.info(
+            "history_table_ready", folder=spec.folder_path,
+            rows_scanned=len(rows), candidates=len(candidates), resumed=resumed,
+        )
+        # Keep the table alive until the consumer finishes using its row IDs.
+        yield table, candidates
+        upper = anchor = lower
+        if len(rows) < _TABLE_BATCH_SIZE:
+            span = min(span * 2, _MAX_WINDOW)
+        elif len(rows) > 4096:
+            span = max(span / 2, timedelta(days=1))
+
+    table, rows = _read_history_window(spec, None, None)
+    candidates = _history_candidates(rows, since=since, resume_at=resume_at)
+    logger.info(
+        "history_table_ready", folder=spec.folder_path,
+        rows_scanned=len(rows), candidates=len(candidates), resumed=resumed,
+    )
+    yield table, candidates
+
+
 def _history_items(
     spec: HistoricalFolder,
     *,
@@ -697,49 +740,14 @@ def _history_items(
         # A committed undated checkpoint follows all dated windows. A
         # legacy null-date cursor has no reliable ordering: replay safely.
         undated_only = bool(committed_ids) and checkpoint_time is None
-        since = since.astimezone(UTC)
-        oldest = _minute_floor(since)
-        upper = (
-            _minute_floor(resume_at) + timedelta(minutes=1)
-            if resume_at is not None else None
-        )
-        anchor = upper or (_minute_floor(datetime.now(UTC)) + timedelta(minutes=1))
-        span = _INITIAL_WINDOW
-
-        while not undated_only and anchor > oldest:
-            lower = max(oldest, anchor - span)
-            # Bounds are minute aligned for Outlook; exact cutoff and
-            # checkpoint are checked again in Python.
-            _table, rows = _read_history_window(spec, lower, upper)
-            candidates = _history_candidates(rows, since=since, resume_at=resume_at)
-            logger.info(
-                "history_table_ready", folder=spec.folder_path,
-                rows_scanned=len(rows), candidates=len(candidates),
-                resumed=bool(state.cursor_entry_id),
-            )
+        for _table, candidates in _history_windows(
+            spec, since=since, resume_at=resume_at,
+            undated_only=undated_only, resumed=bool(state.cursor_entry_id),
+        ):
             yield from _yield_history_candidates(
                 namespace, spec, candidates,
                 checkpoint_time=checkpoint_time, committed_ids=committed_ids,
             )
-            # No older query until this window is exhausted. Reconnects
-            # start at the last committed date, not at the folder head.
-            upper = anchor = lower
-            if len(rows) < _TABLE_BATCH_SIZE:
-                span = min(span * 2, _MAX_WINDOW)
-            elif len(rows) > 4096:
-                span = max(span / 2, timedelta(days=1))
-
-        _table, rows = _read_history_window(spec, None, None)
-        candidates = _history_candidates(rows, since=since, resume_at=resume_at)
-        logger.info(
-            "history_table_ready", folder=spec.folder_path,
-            rows_scanned=len(rows), candidates=len(candidates),
-            resumed=bool(state.cursor_entry_id),
-        )
-        yield from _yield_history_candidates(
-            namespace, spec, candidates,
-            checkpoint_time=checkpoint_time, committed_ids=committed_ids,
-        )
     except Exception as exc:
         # A bad filter or unreadable row is a paused import, never an
         # apparently successful but incomplete folder.
@@ -871,6 +879,18 @@ def _drain_indexing(
     }
 
 
+def _resolve_since(years: int, since_at: str = "") -> datetime:
+    if not since_at:
+        return datetime.now(UTC) - timedelta(days=years * 365 + years // 4)
+    try:
+        value = datetime.fromisoformat(since_at)
+    except ValueError as exc:
+        raise typer.BadParameter("since-at must be an ISO 8601 timestamp with timezone.") from exc
+    if value.tzinfo is None or value > datetime.now(UTC):
+        raise typer.BadParameter("since-at must be timezone-aware and not in the future.")
+    return value.astimezone(UTC)
+
+
 @app.command()
 def import_history(
     primary_store: str = typer.Option(
@@ -923,6 +943,11 @@ def import_history(
         min=1,
         max=10000,
     ),
+    since_at: str = typer.Option(
+        "",
+        "--since-at",
+        help="Fixed ISO 8601 cutoff shared with a history inventory.",
+    ),
 ) -> None:
     settings = get_settings()
     configure_logging(settings.log_level)
@@ -951,9 +976,7 @@ def import_history(
 
     started_at = now_iso()
     started_monotonic = time.monotonic()
-    since = datetime.now(UTC) - timedelta(
-        days=years * 365 + years // 4
-    )
+    since = _resolve_since(years, since_at)
     base_status = {
         "status": "running",
         "started_at": started_at,
