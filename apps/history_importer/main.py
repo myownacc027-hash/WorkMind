@@ -763,6 +763,7 @@ def _get_state(
     spec: HistoricalFolder,
     since: datetime,
     reset: bool,
+    preserve_cursor: bool = False,
 ) -> HistoryImportState:
     state = session.scalar(
         select(HistoryImportState).where(
@@ -795,6 +796,10 @@ def _get_state(
             and state.oldest_allowed_at > since
         )
     )
+    if needs_reset and preserve_cursor:
+        raise OutlookFolderUnavailable(
+            "Fixed inventory cutoff would reset an existing history cursor."
+        )
     if needs_reset:
         state.status = "pending"
         state.cursor_entry_id = None
@@ -976,6 +981,8 @@ def import_history(
 
     started_at = now_iso()
     started_monotonic = time.monotonic()
+    if since_at and reset:
+        raise typer.BadParameter("--since-at cannot be combined with --reset.")
     since = _resolve_since(years, since_at)
     base_status = {
         "status": "running",
@@ -1100,6 +1107,7 @@ def import_history(
                         spec=spec,
                         since=since,
                         reset=reset,
+                        preserve_cursor=bool(since_at),
                     )
                     already_complete = (
                         state.status == "completed"
@@ -1129,6 +1137,7 @@ def import_history(
                         spec=spec,
                         since=since,
                         reset=False,
+                        preserve_cursor=bool(since_at),
                     )
                     mailbox = session.get(
                         Mailbox,
@@ -1208,6 +1217,7 @@ def import_history(
                                 spec=spec,
                                 since=since,
                                 reset=False,
+                                preserve_cursor=bool(since_at),
                             )
                             state.failed_count += 1
                             state.last_error = _safe_text(exc)
